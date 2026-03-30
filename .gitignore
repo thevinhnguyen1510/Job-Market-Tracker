@@ -1,0 +1,15 @@
+# Bỏ qua thư mục môi trường ảo
+venv/
+__pycache__/
+
+# TUYỆT ĐỐI KHÔNG ĐẨY DATABASE VÀ RAW DATA LÊN
+*.duckdb
+*.duckdb.wal
+*.csv
+
+# BẢO MẬT API KEY
+.env
+
+# Bỏ qua toàn bộ file log
+*.log
+logs/

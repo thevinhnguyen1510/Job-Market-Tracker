@@ -11,13 +11,13 @@ print("\n[1] TABLES IN DATABASE:")
 print(conn.execute("SHOW TABLES;").df())
 
 # 2. CHECK SCHEMA: What columns do we have, and what are their data types?
-print("\n[2] SCHEMA OF 'silver_itviec_jobs':")
+print("\n[2] SCHEMA OF 'raw_itviec_jobs':")
 print(conn.execute("DESCRIBE silver_itviec_jobs;").df())
 
 # 3. CHECK DATA: Let's peek at the actual AI-enriched data (First 3 rows)
 print("\n[3] SAMPLE AI-ENRICHED DATA:")
 sample_query = """
-    SELECT ai_job_role, job_title
+    SELECT job_url, job_title, company_name
     FROM silver_itviec_jobs 
     LIMIT 10;
 """

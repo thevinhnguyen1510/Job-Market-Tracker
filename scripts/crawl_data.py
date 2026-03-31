@@ -5,6 +5,7 @@ from datetime import datetime
 import os
 import time          
 import random
+import duckdb
 
 print("Starting the hunt on ITviec with heavy weapons...")
 
@@ -37,7 +38,14 @@ for keyword in keywords:
         # FIX 1: Make URL dynamic based on the current keyword in the loop
         url = f"https://itviec.com/it-jobs/{keyword}?page={page}"
         
-        response = requests.get(url, headers=headers, impersonate="chrome110")
+        try:
+            # Add timeout=30 to report error if too slow, instead of hanging the system
+            response = requests.get(url, headers=headers, impersonate="chrome110", timeout=30)
+        except Exception as e:
+            print(f"Network lag or blocked (Timeout) at page {page}: {e}")
+            print("Taking a 10-second break to fool the server and try again...")
+            time.sleep(10)
+            continue # Skip the rest of this loop, go back to crawling this exact page again
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
@@ -119,16 +127,62 @@ for keyword in keywords:
             print(f"Reached 50 pages for {keyword.upper()}, applying emergency brake!")
             break
 
-# 3. CONVERT TO DATAFRAME AND SAVE TO CSV
+# 3. LOAD DATA INTO BRONZE LAYER (DUCKDB) WITH DUPLICATE PREVENTION
 if jobs_data:
-    df = pd.DataFrame(jobs_data)
+    print("\nLoading data into Database (Bronze Layer)...")
     
-    output_dir = '../data/raw/'
-    os.makedirs(output_dir, exist_ok=True)
+    # Connect to DuckDB
+    db_path = '../job_market.duckdb' # Make sure the path is correct when running with Docker/Airflow
+    conn = duckdb.connect(db_path)
     
-    file_path = os.path.join(output_dir, f'itviec_raw_{datetime.now().strftime("%Y%m%d_%H%M")}.csv')
-    df.to_csv(file_path, index=False, encoding='utf-8')
+    # 3.1. Ensure table raw_itviec_jobs exists (with PRIMARY KEY to prevent duplicates)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS raw_itviec_jobs (
+            job_url VARCHAR PRIMARY KEY,
+            job_title VARCHAR,
+            company_name VARCHAR,
+            location VARCHAR,
+            salary_raw VARCHAR,
+            tech_stack VARCHAR,
+            source VARCHAR,
+            crawl_timestamp TIMESTAMP,
+            experience_level VARCHAR,
+            job_category VARCHAR,
+            job_description VARCHAR
+        );
+    """)
     
-    print(f"\nMISSION ACCOMPLISHED! Successfully saved {len(df)} jobs to: {file_path}")
+    # 3.2. Insert data (Skip if job_url already exists)
+    new_jobs_count = 0
+    for job in jobs_data:
+        try:
+            conn.execute("""
+                INSERT INTO raw_itviec_jobs (
+                    job_url, job_title, company_name, location, salary_raw, 
+                    tech_stack, source, crawl_timestamp, experience_level, 
+                    job_category, job_description
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (job_url) DO NOTHING;
+            """, (
+                job['job_url'], job['job_title'], job['company_name'], job['location'], 
+                job['salary_raw'], job['tech_stack'], job['source'], job['crawl_timestamp'], 
+                job['experience_level'], job['job_category'], job['job_description']
+            ))
+            
+            # If insertion is successful (no duplicate) and cursor changes number of rows
+            # Note: DuckDB returns information via fetchone() for INSERT commands
+            # But for simplicity, we just count the total number of attempts
+            new_jobs_count += 1 
+            
+        except Exception as e:
+            print(f"Error inserting job {job['job_title']}: {e}")
+            
+    # Statistics
+    total_raw = conn.execute("SELECT COUNT(*) FROM raw_itviec_jobs").fetchone()[0]
+    conn.close()
+    
+    print(f" MISSION ACCOMPLISHED!")
+    print(f"   - Number of jobs collected this time: {len(jobs_data)}")
+    print(f"   - Total number of jobs in Database (Bronze Layer): {total_raw}")
 else:
     print("\nMission failed: No data collected.")

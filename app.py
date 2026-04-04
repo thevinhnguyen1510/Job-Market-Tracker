@@ -5,14 +5,21 @@ import os
 import tempfile
 import re
 from dotenv import load_dotenv
+
+# --- LANGCHAIN & QDRANT LIBRARIES ---
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
+from langchain_qdrant import QdrantVectorStore
+from qdrant_client import QdrantClient
+from qdrant_client.models import Filter, FieldCondition, Range
 from langchain_core.documents import Document
+from qdrant_client.models import VectorParams, Distance
 
 # 1. SETUP & CONFIGURATION
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+QDRANT_PATH = "local_qdrant_db" # Path to store Qdrant Vector DB
+COLLECTION_NAME = "it_jobs_collection"
 
 st.set_page_config(page_title="IT Job Market & AI Coach", layout="wide", page_icon="🚀")
 st.title("🚀 IT Job Market Tracker & AI Career Coach")
@@ -50,27 +57,28 @@ with tab1:
         conn.close()
 
 # ==========================================
-# TAB 2: AI CAREER COACH
+# TAB 2: AI CAREER COACH (RAG SYSTEM WITH QDRANT)
 # ==========================================
 with tab2:
-    st.subheader("Upload your CV & Get AI Gap Analysis")
-    st.markdown("System strictly checks: **Education -> Experience -> Tech Stack**.")
+    st.subheader("🎯 Upload your CV & Get AI Gap Analysis")
+    st.markdown("Strict Verification Pipeline: **Education -> Experience -> Tech Stack**.")
     
     uploaded_cv = st.file_uploader("Upload CV (PDF format only)", type=["pdf"])
     
     if uploaded_cv is not None:
-        if st.button("Analyze CV & Find Jobs", type="primary"):
+        if st.button("Analyze CV & Match Jobs", type="primary"):
             
             if not OPENAI_API_KEY:
-                st.error("⚠️ Missing OPENAI_API_KEY. Please check the .env file!")
+                st.error("⚠️ Missing OPENAI_API_KEY. Please check your .env file!")
                 st.stop()
 
             with st.status("AI is processing...", expanded=True) as status:
                 try:
                     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
+                    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
-                    # BƯỚC 1: READ PDF FILE
-                    status.update(label="1. Reading and extracting CV...")
+                    # STEP 1: READ PDF FILE
+                    status.update(label="1. Loading and parsing CV document...")
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
                         tmp_file.write(uploaded_cv.getvalue())
                         tmp_path = tmp_file.name
@@ -80,116 +88,167 @@ with tab2:
                     cv_text = " ".join([p.page_content for p in cv_pages])
                     os.remove(tmp_path) 
 
-                    # BƯỚC 1.5: Analyze work experience to filter jobs (PRE-FILTERING)
-                    status.update(label="2. Analyzing work experience...")
-                    yoe_prompt = f"""
-                    Read the CV below and return EXACTLY 1 integer representing the total years of professional work experience of the candidate.
-                    - Do NOT count university study time.
-                    - Include internship periods.
-                    - Return 0 if no work experience.
-                    CV Text: {cv_text[:2000]}
-                    """
-                    yoe_response = llm.invoke(yoe_prompt).content
-                    numbers = re.findall(r'\d+', yoe_response)
-                    candidate_yoe = int(numbers[0]) if numbers else 0
-                    st.write(f"*(AI estimates you have about {candidate_yoe} years of experience)*")
+                    # STEP 1.5: QUERY TRANSFORMATION (Estimate YOE & Translate to English Query)
+                    status.update(label="2. Analyzing practical experience & Standardizing query...")
+                    search_profile_prompt = f"""
+                    Read the following CV and perform 2 tasks:
+                    1. Count the total years of practical work experience (return an integer). Do not include university study time.
+                    2. Summarize the candidate's Job Role and core Tech Stack into a SINGLE, highly relevant English sentence (e.g., 'Senior Backend Developer skilled in Python, Django, AWS, and PostgreSQL').
 
-                    # BƯỚC 2: GET JOBS FROM DUCKDB WITH JOB URL
-                    status.update(label="3. Filtering jobs by experience...")
-                    conn = duckdb.connect('job_market.duckdb', read_only=True)
+                    Return the result EXACTLY in the following format (Do not add any other text):
+                    YOE: [Number of years]
+                    QUERY: [English summary query]
+
+                    CV Text: {cv_text[:3000]}
+                    """
                     
-                    # IMPORTANT: Select job_url field
-                    query = f"""
-                        SELECT job_url, job_title, ai_core_tech_stack, min_years_of_experience, english_requirement, job_level 
-                        FROM silver_itviec_jobs 
-                        WHERE job_level != 'Error' 
-                          AND min_years_of_experience <= {candidate_yoe + 1}
-                        LIMIT 200
-                    """
-                    jobs_df = conn.execute(query).df()
-                    conn.close()
+                    profile_response = llm.invoke(search_profile_prompt).content
+                    
+                    # Extract Results
+                    candidate_yoe = 0
+                    search_query = cv_text # Default fallback
+                    
+                    try:
+                        lines = profile_response.strip().split('\n')
+                        for line in lines:
+                            if line.startswith("YOE:"):
+                                candidate_yoe = int(re.findall(r'\d+', line)[0])
+                            elif line.startswith("QUERY:"):
+                                search_query = line.replace("QUERY:", "").strip()
+                    except Exception as e:
+                         st.warning("Error extracting YOE. Defaulting to 0 years.")
+                    
+                    st.write(f"*(AI estimated experience: **{candidate_yoe} years**)*")
+                    st.write(f"*(Optimized Search Query: **{search_query}**)*")
 
-                    if jobs_df.empty:
-                        st.warning(f"No jobs found matching your experience level of {candidate_yoe} years.")
+                    # STEP 2: LOAD OR INITIALIZE QDRANT VECTOR DATABASE
+                    status.update(label="3. Accessing Qdrant Vector Database...")
+                    
+                    # Use Streamlit Cache to ensure only ONE connection is made
+                    @st.cache_resource
+                    def get_qdrant_client():
+                        return QdrantClient(path=QDRANT_PATH)
+                    
+                    client = get_qdrant_client()
+                    
+                    # KIỂM TRA TRƯỚC: Collection đã tồn tại chưa?
+                    if client.collection_exists(collection_name=COLLECTION_NAME):
+                        # Load from Local Cache
+                        status.update(label="3. Loading Qdrant DB from local storage...")
+                        vectorstore = QdrantVectorStore(
+                            client=client, 
+                            collection_name=COLLECTION_NAME, 
+                            embedding=embeddings
+                        )
+                    else:
+                        # First time setup: Generate and Save to Qdrant
+                        status.update(label="3. No cache found. Initializing Qdrant DB (First run)...")
+                        conn = duckdb.connect('job_market.duckdb', read_only=True)
+                        query = f"""
+                            SELECT job_url, job_title, ai_core_tech_stack, min_years_of_experience, english_requirement, job_level 
+                            FROM silver_itviec_jobs 
+                            WHERE job_level != 'Error' LIMIT 200
+                        """
+                        jobs_df = conn.execute(query).df()
+                        conn.close()
+
+                        if jobs_df.empty:
+                            st.warning("Database is empty!")
+                            st.stop()
+
+                        job_docs = []
+                        for _, row in jobs_df.iterrows():
+                            content = f"Title: {row['job_title']} | Tech: {row['ai_core_tech_stack']} | Level: {row['job_level']} | Exp: {row['min_years_of_experience']} years | English: {row['english_requirement']}"
+                            job_docs.append(Document(
+                                page_content=content,
+                                metadata={
+                                    "job_title": row['job_title'], 
+                                    "job_url": row['job_url'], 
+                                    "yoe": row['min_years_of_experience']
+                                }
+                            ))
+
+                        #Calculate vector dimension and create collection manually
+                        #vector_size = len(embeddings.embed_query("test")) # AI automatically calculates 1536 dimensions
+                        client.create_collection(
+                            collection_name=COLLECTION_NAME,
+                            vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
+                        )
+                        
+                        # Initialize VectorStore and inject data (Absolutely no file locking)
+                        vectorstore = QdrantVectorStore(
+                            client=client,
+                            collection_name=COLLECTION_NAME,
+                            embedding=embeddings
+                        )
+                        vectorstore.add_documents(job_docs)
+                    
+                    # STEP 3: SEARCH WITH STANDARDIZED QUERY & QDRANT PRE-FILTER
+                    status.update(label="4. Finding best candidates using Qdrant Pre-filtering...")
+                    
+                    # Qdrant Native Metadata Filter: Job YOE <= Candidate YOE + 1
+                    qdrant_filter = Filter(
+                        must=[
+                            FieldCondition(
+                                key="metadata.yoe", 
+                                range=Range(lte=candidate_yoe + 1)
+                            )
+                        ]
+                    )
+                    
+                    # Search using the English transformed query + Qdrant Filter
+                    retriever = vectorstore.as_retriever(
+                        search_kwargs={"k": 3, "filter": qdrant_filter} 
+                    )
+                    matched_jobs = retriever.invoke(search_query)
+                    
+                    if not matched_jobs:
+                        st.warning(f"Unfortunately, no jobs found matching {candidate_yoe} years of experience.")
                         st.stop()
-
-                    # BƯỚC 3: SEARCH VECTOR BY TECH STACK (ATTACH URL TO METADATA)
-                    status.update(label="4. Matching tech stack...")
-                    job_docs = []
-                    for _, row in jobs_df.iterrows():
-                        content = f"Title: {row['job_title']} | Tech: {row['ai_core_tech_stack']} | Level: {row['job_level']} | Exp: {row['min_years_of_experience']} years | English: {row['english_requirement']}"
                         
-                        # Attach title and url to Document metadata
-                        job_docs.append(Document(
-                            page_content=content,
-                            metadata={"job_title": row['job_title'], "job_url": row['job_url']}
-                        ))
-
-                    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-                    vectorstore = FAISS.from_documents(job_docs, embeddings) 
-
-                    with st.expander("🛠️ See what's inside the FAISS Vector DB"):
-                        # FAISS hides the original data in an object called docstore
-                        all_docs_in_faiss = vectorstore.docstore._dict.values()
-                        st.write(f"Total jobs vectorized and stored in FAISS: **{len(all_docs_in_faiss)}**")
-                        
-                        # Convert to table format for easier viewing
-                        debug_data = []
-                        for doc in all_docs_in_faiss:
-                            debug_data.append({
-                                "Job Title": doc.metadata.get("job_title"),
-                                "Text Content (for Vector comparison)": doc.page_content,
-                                "URL Link": doc.metadata.get("job_url")
-                            })
-                        st.dataframe(debug_data)
-                    
-                    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-                    matched_jobs = retriever.invoke(cv_text)
                     jobs_context = "\n\n".join([f"Job {i+1}: {doc.page_content}" for i, doc in enumerate(matched_jobs)])
 
-                    # BƯỚC 4: CREATE COMPREHENSIVE EVALUATION REPORT
-                    status.update(label="5. HR Expert is writing comprehensive evaluation...")
+                    # STEP 4: GENERATE HR EVALUATION REPORT
+                    status.update(label="5. HR Expert is drafting the Gap Analysis...")
                     llm_eval = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
                     prompt = f"""
-                    You are a very strict and logical HR Director in the IT industry.
-                    Below is the candidate's CV and the top 3 matching jobs (pre-filtered by our system to ensure experience requirements are not too demanding).
+                    You are a highly analytical and strict HR Director in the IT industry.
+                    Below is the candidate's CV and the Top 3 matching jobs (already pre-filtered by experience level).
 
-                    ### CV OF CANDIDATE:
+                    ### CANDIDATE'S ORIGINAL CV:
                     {cv_text[:3500]} 
 
-                    ### TOP 3 JOBS MATCH:
+                    ### TOP 3 MATCHING JOBS:
                     {jobs_context}
 
-                    ### MISSION EVALUATION (FOLLOW THE ORDER BELOW):
-                    1. **Evaluate Education & Learning Path:** Quickly comment on the candidate's school, major, certifications, or self-learning process. Does this foundation suit long-term growth?
-                    2. **Evaluate Experience (Work Duration):** How many years of experience does the candidate have? Are the projects they've worked on deep enough, or just surface-level? Compared to the experience requirements of the 3 Jobs above, does the candidate fall behind?
-                    3. **Evaluate Tech Stack (Tools):** Identify exactly which technical skills the candidate is strong in, and which skills the Job requires but the CV is missing (Gap).
-                    4. **30-Day Strategy:** The most practical advice to help the candidate fill the Gap before applying to these 3 companies.
+                    ### EVALUATION TASKS (STRICTLY FOLLOW THIS ORDER):
+                    1. **Background Assessment (Education & Learning):** Briefly comment on the candidate's university, major, certificates, or self-learning path. Is this foundation solid for long-term growth?
+                    2. **Experience Assessment (Work History):** How many years of experience does the candidate have? Are the projects deep enough or superficial? Compared to the required experience of the 3 Jobs above, is the candidate underqualified?
+                    3. **Tech Stack Assessment (Tools & Frameworks):** Point out exactly which technical skills the candidate is strong at, and which required skills from the Jobs are missing (The Gap).
+                    4. **30-Day Strategy:** Provide the most practical advice for the candidate to bridge the Gap before applying to these 3 companies.
 
-                    Answer in English, use clear Markdown, direct tone, no flattery.
+                    Respond in English, use clear Markdown formatting, and maintain a direct, professional, and uncompromising tone (do not flatter the candidate).
                     """
                     
                     response = llm_eval.invoke(prompt)
-                    status.update(label="✅ Analysis complete!", state="complete")
+                    status.update(label="✅ Analysis Complete!", state="complete")
                     
-                    # Display Results (Include Job Links)
+                    # RENDER RESULTS
                     col1, col2 = st.columns([1, 2])
                     with col1:
-                        st.info("📌 **Top 3 best matching Jobs:**")
+                        st.info("📌 **Top 3 Best Matching Jobs:**")
                         for job in matched_jobs:
-                            title = job.metadata.get("job_title", "View job details")
+                            title = job.metadata.get("job_title", "View Job Details")
                             url = job.metadata.get("job_url", "#")
                             
-                            # Display Job Title as a clickable Link
                             st.markdown(f"**[{title}]({url})**")
-                            # Display technology summary below
                             clean_content = job.page_content.replace(f"Title: {title} | ", "")
                             st.caption(clean_content)
-                            st.divider() # Divider line between Jobs
+                            st.divider()
                             
                     with col2:
                         st.markdown(response.content)
 
                 except Exception as e:
-                    status.update(label="❌ Error occurred!", state="error")
-                    st.error(f"System error: {e}")
+                    status.update(label="❌ An error occurred!", state="error")
+                    st.error(f"System Error: {e}")

@@ -1,11 +1,23 @@
-venv/
-__pycache__/
-
-*.duckdb
-*.duckdb.wal
-*.csv
-
+# Ignore environment variables (Never expose OpenAI API Key)
 .env
 
+# Ignore Python virtual environments
+venv/
+.venv/
+env/
+
+# Ignore Database files
+*.duckdb
+*.db
+*.duckdb.wal
+*.csv
+local_qdrant_db/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Ignore log files
 *.log
 logs/

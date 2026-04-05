@@ -5,6 +5,7 @@ import os
 import tempfile
 import re
 from dotenv import load_dotenv
+import plotly.express as px
 
 # --- LANGCHAIN & QDRANT LIBRARIES ---
 from langchain_community.document_loaders import PyPDFLoader
@@ -27,32 +28,159 @@ st.title("🚀 IT Job Market Tracker & AI Career Coach")
 tab1, tab2 = st.tabs(["📊 Market Dashboard", "🤖 AI Career Coach (RAG)"])
 
 # ==========================================
-# TAB 1: DASHBOARD
+# TAB 1: DASHBOARD (EXECUTIVE LEVEL)
 # ==========================================
 with tab1:
-    st.markdown("Data is automatically extracted and standardized by **LLM (GPT-4o-mini)**.")
+    st.markdown("### 📊 IT Market Intelligence Dashboard")
+    st.markdown("Data is automatically extracted, standardized, and visualized directly from the **Silver Data Layer**.")
+    
     conn = duckdb.connect('job_market.duckdb', read_only=True)
     try:
-        st.subheader("🔥 Top In-Demand Tech Skills")
-        df_skills = conn.execute("""
-            WITH cleaned_strings AS (
-                SELECT job_url, REPLACE(REPLACE(REPLACE(ai_core_tech_stack, '[', ''), ']', ''), '"', '') AS clean_stack
-                FROM silver_itviec_jobs WHERE ai_core_tech_stack IS NOT NULL
-            ),
-            unnested_skills AS (
-                SELECT job_url, TRIM(UNNEST(string_split(clean_stack, ','))) AS skill
-                FROM cleaned_strings WHERE clean_stack != ''
-            )
-            SELECT skill, COUNT(DISTINCT job_url) AS total_mentions
-            FROM unnested_skills WHERE skill != '' GROUP BY skill ORDER BY total_mentions DESC LIMIT 15
-        """).df()
+        # ==========================================
+        # SECTION 1: MACRO OVERVIEW (STATIC)
+        # ==========================================
+        st.markdown("#### 🌍 1. Macro Market Overview (Market Structure)")
+        
+        # Metrics total 
+        macro_jobs = conn.execute("SELECT COUNT(*) FROM silver_itviec_jobs WHERE job_level != 'Error'").fetchone()[0]
+        macro_yoe = conn.execute("SELECT ROUND(AVG(min_years_of_experience), 1) FROM silver_itviec_jobs WHERE min_years_of_experience IS NOT NULL").fetchone()[0]
+        
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("Total Jobs Scanned", f"{macro_jobs:,}")
+        col_m2.metric("Market Avg. Experience", f"{macro_yoe} Yrs")
+        col_m3.metric("Data Engine", "DuckDB + dbt")
+        
+        # Macro charts (Static, not filtered)
+        macro_col1, macro_col2 = st.columns(2)
+        
+        with macro_col1:
+            df_levels = conn.execute("""
+                SELECT job_level, COUNT(*) as count 
+                FROM silver_itviec_jobs 
+                WHERE job_level != 'Error' AND job_level IS NOT NULL 
+                GROUP BY job_level
+            """).df()
+            if not df_levels.empty:
+                fig_donut = px.pie(
+                    df_levels, values='count', names='job_level', hole=0.4, 
+                    title="Market Structure: Job Levels", 
+                    color_discrete_sequence=px.colors.sequential.Teal
+                )
+                fig_donut.update_traces(textposition='inside', textinfo='percent+label')
+                fig_donut.update_layout(showlegend=False, margin=dict(t=40, b=0, l=0, r=0))
+                st.plotly_chart(fig_donut, use_container_width=True)
+                
+        with macro_col2:
+            df_yoe_macro = conn.execute("""
+                SELECT min_years_of_experience 
+                FROM silver_itviec_jobs 
+                WHERE min_years_of_experience IS NOT NULL
+            """).df()
+            if not df_yoe_macro.empty:
+                # New insight: Experience distribution histogram
+                fig_hist = px.histogram(
+                    df_yoe_macro, x="min_years_of_experience", nbins=10, 
+                    title="Market Structure: Required Experience", 
+                    color_discrete_sequence=['#ff4b4b']
+                )
+                fig_hist.update_layout(xaxis_title="Years of Experience", yaxis_title="Number of Jobs", margin=dict(t=40, b=0, l=0, r=0))
+                st.plotly_chart(fig_hist, use_container_width=True)
 
-        if not df_skills.empty:
-            st.bar_chart(data=df_skills.set_index('skill'), y='total_mentions', color="#ff4b4b")
-        else:
-            st.warning("No data found in the Gold Layer.")
+        st.divider()
+
+        # ==========================================
+        # SECTION 2: DEEP DIVE (DYNAMIC FILTERED)
+        # ==========================================
+        st.markdown("#### 🔬 2. Role-Specific Deep Dive (Filterable)")
+        
+        df_levels_unique = conn.execute("SELECT DISTINCT job_level FROM silver_itviec_jobs WHERE job_level != 'Error' AND job_level IS NOT NULL ORDER BY job_level").df()
+        levels_list = df_levels_unique['job_level'].tolist() if not df_levels_unique.empty else []
+        
+        selected_level = st.selectbox(
+            "🎯 Select a Job Level to deeply analyze its specific requirements:", 
+            ["All Levels"] + levels_list,
+            key="job_level_filter" 
+        )
+        
+        global_filter_sql = ""
+        if selected_level != "All Levels":
+            global_filter_sql = f"AND job_level = '{selected_level}'"
+
+        # Count jobs and calculate average years of experience
+        dyn_jobs = conn.execute(f"SELECT COUNT(*) FROM silver_itviec_jobs WHERE job_level != 'Error' {global_filter_sql}").fetchone()[0]
+        dyn_yoe = conn.execute(f"SELECT ROUND(AVG(min_years_of_experience), 1) FROM silver_itviec_jobs WHERE min_years_of_experience IS NOT NULL {global_filter_sql}").fetchone()[0]
+        dyn_yoe = dyn_yoe if dyn_yoe is not None else 0
+        
+        # Calculate percentage of jobs WITH English requirement (excluding "Not mentioned")
+        eng_demand = conn.execute(f"SELECT COUNT(*) FROM silver_itviec_jobs WHERE english_requirement != 'Not mentioned' AND english_requirement IS NOT NULL {global_filter_sql}").fetchone()[0]
+        eng_pct = round((eng_demand / dyn_jobs) * 100, 1) if dyn_jobs > 0 else 0
+
+        # Update 3 Metric cards
+        col_d1, col_d2, col_d3 = st.columns(3)
+        col_d1.metric(f"Jobs ({selected_level})", f"{dyn_jobs:,}")
+        col_d2.metric("Avg. Experience", f"{dyn_yoe} Yrs")
+        col_d3.metric("English Required", f"{eng_pct}%", help="Percentage of JDs requiring English (from Intermediate level up)")
+
+        dyn_col1, dyn_col2 = st.columns([1.5, 1])
+        
+        with dyn_col1:
+            # Chart 1: TECH STACK (Keep original)
+            df_skills = conn.execute(f"""
+                WITH cleaned_strings AS (
+                    SELECT job_url, REPLACE(REPLACE(REPLACE(ai_core_tech_stack, '[', ''), ']', ''), '"', '') AS clean_stack
+                    FROM silver_itviec_jobs 
+                    WHERE ai_core_tech_stack IS NOT NULL {global_filter_sql}
+                ),
+                unnested_skills AS (
+                    SELECT job_url, TRIM(UNNEST(string_split(clean_stack, ','))) AS skill
+                    FROM cleaned_strings WHERE clean_stack != ''
+                )
+                SELECT skill, COUNT(DISTINCT job_url) AS total_mentions
+                FROM unnested_skills 
+                WHERE skill != '' 
+                GROUP BY skill 
+                ORDER BY total_mentions DESC LIMIT 10
+            """).df()
+
+            if not df_skills.empty:
+                fig_bar = px.bar(
+                    df_skills, x='total_mentions', y='skill', orientation='h',
+                    title=f"Top 10 Tech Stack for {selected_level}",
+                    color='total_mentions', color_continuous_scale='Reds'
+                )
+                fig_bar.update_layout(yaxis={'categoryorder':'total ascending'}, margin=dict(t=40, b=0, l=0, r=0))
+                st.plotly_chart(fig_bar, use_container_width=True)
+            else:
+                st.info("No tech stack data available.")
+
+        with dyn_col2:
+            # Chart 2: ENGLISH COMPETENCY (Based on new data classified by LLM)
+            df_eng_levels = conn.execute(f"""
+                SELECT english_requirement, COUNT(*) as count 
+                FROM silver_itviec_jobs 
+                WHERE english_requirement IS NOT NULL {global_filter_sql}
+                GROUP BY english_requirement
+            """).df()
+            
+            if not df_eng_levels.empty:
+                # Change to Bar Chart vertical for easier comparison of levels
+                fig_eng = px.bar(
+                    df_eng_levels, x='english_requirement', y='count',
+                    title=f"English Proficiency Demand",
+                    color='english_requirement',
+                    color_discrete_sequence=px.colors.qualitative.Pastel
+                )
+                fig_eng.update_layout(
+                    xaxis_title="", 
+                    yaxis_title="Number of Jobs", 
+                    showlegend=False,
+                    xaxis_tickangle=-45,
+                    margin=dict(t=40, b=0, l=0, r=0)
+                )
+                st.plotly_chart(fig_eng, use_container_width=True)
+
     except Exception as e:
-        st.error(f"Database query error: {e}")
+        st.error(f"Dashboard query error: {e}")
     finally:
         conn.close()
 
@@ -131,7 +259,7 @@ with tab2:
                     
                     client = get_qdrant_client()
                     
-                    # KIỂM TRA TRƯỚC: Collection đã tồn tại chưa?
+                    # CHECK: Collection already exists?
                     if client.collection_exists(collection_name=COLLECTION_NAME):
                         # Load from Local Cache
                         status.update(label="3. Loading Qdrant DB from local storage...")
@@ -231,7 +359,7 @@ with tab2:
                     """
                     
                     response = llm_eval.invoke(prompt)
-                    status.update(label="✅ Analysis Complete!", state="complete")
+                    status.update(label="Analysis Complete!", state="complete")
                     
                     # RENDER RESULTS
                     col1, col2 = st.columns([1, 2])
@@ -250,5 +378,5 @@ with tab2:
                         st.markdown(response.content)
 
                 except Exception as e:
-                    status.update(label="❌ An error occurred!", state="error")
+                    status.update(label="An error occurred!", state="error")
                     st.error(f"System Error: {e}")

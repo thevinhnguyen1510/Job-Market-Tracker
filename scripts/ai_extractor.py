@@ -7,6 +7,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field, model_validator
 from typing import List, Literal
 from dotenv import load_dotenv
+from enum import Enum
 
 print("INITIATING SPRINT 1: AI MASS EXTRACTOR (SILVER LAYER)...")
 
@@ -38,6 +39,12 @@ conn.execute("""
 """)
 
 # 3. DEFINE THE STRICT DATA CONTRACT (PYDANTIC SCHEMA)
+class EnglishLevel(str, Enum):
+    NONE = "Not mentioned"
+    READING = "Read/Write basic documentations"
+    COMMUNICATION = "Communicate with clients"
+    CERTIFICATE = "Required certificate (IELTS/TOEIC)"
+
 class JobExtraction(BaseModel):
     min_years_of_experience: int = Field(
         ..., 
@@ -50,9 +57,14 @@ class JobExtraction(BaseModel):
         description="Max 5 HARD technical skills. Standardize names. Example: ['React', 'Node.js', 'AWS', 'PostgreSQL']." # TỐI ƯU 2: Thêm example
     )
     
-    english_requirement: Literal["Basic", "Intermediate", "Fluent", "Not mentioned"] = Field(
+    english_requirement: EnglishLevel = Field(
         ..., 
-        description="Determine English level. 'Read/Write basic' -> Basic. 'Communicate with clients' -> Fluent."
+        description="""Read the Job Description and classify the English requirement:
+        - Choose 'Not mentioned' if the JD does not mention English at all.
+        - Choose 'Read/Write basic documentations' if it only requires reading basic English documents.
+        - Choose 'Communicate with clients' if it requires working with foreign teams, writing emails, or chatting.
+        - Choose 'Required certificate (IELTS/TOEIC)' if it clearly states a score or requires excellent English.
+        """
     )
     
     job_role: Literal["Backend", "Frontend", "Fullstack", "Mobile", "Data Engineer", "Data Scientist", "Data/Business Analyst", "Product Owner/Manager", "QA/QC/Tester", "DevOps/Cloud", "System Admin", "UI/UX Designer", "Security", "Scrum Master", "AI/Machine Learning", "Unknown"] = Field(

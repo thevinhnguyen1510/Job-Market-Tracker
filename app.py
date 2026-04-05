@@ -124,28 +124,32 @@ with tab1:
         dyn_col1, dyn_col2 = st.columns([1.5, 1])
         
         with dyn_col1:
-            # Chart 1: TECH STACK (Keep original)
-            df_skills = conn.execute(f"""
-                WITH cleaned_strings AS (
-                    SELECT job_url, REPLACE(REPLACE(REPLACE(ai_core_tech_stack, '[', ''), ']', ''), '"', '') AS clean_stack
-                    FROM silver_itviec_jobs 
-                    WHERE ai_core_tech_stack IS NOT NULL {global_filter_sql}
-                ),
-                unnested_skills AS (
-                    SELECT job_url, TRIM(UNNEST(string_split(clean_stack, ','))) AS skill
-                    FROM cleaned_strings WHERE clean_stack != ''
-                )
-                SELECT skill, COUNT(DISTINCT job_url) AS total_mentions
-                FROM unnested_skills 
-                WHERE skill != '' 
-                GROUP BY skill 
-                ORDER BY total_mentions DESC LIMIT 10
-            """).df()
+            # Handle logic for "All Levels" and "Each Level" separately
+            if selected_level == "All Levels":
+                # If it's All Levels: Must sum up (SUM) the quantity of all Level
+                sql_query = """
+                    SELECT skill, SUM(mentions) as total_mentions
+                    FROM gold_tech_stack_counts
+                    GROUP BY skill
+                    ORDER BY total_mentions DESC
+                    LIMIT 10
+                """
+            else:
+                # If selecting a specific Level: Only take the quantity of that Level
+                sql_query = f"""
+                    SELECT skill, mentions as total_mentions
+                    FROM gold_tech_stack_counts
+                    WHERE job_level = '{selected_level}'
+                    ORDER BY total_mentions DESC
+                    LIMIT 10
+                """
+                
+            df_skills = conn.execute(sql_query).df()
 
             if not df_skills.empty:
                 fig_bar = px.bar(
                     df_skills, x='total_mentions', y='skill', orientation='h',
-                    title=f"Top 10 Tech Stack for {selected_level}",
+                    title=f"Top 10 Tech Stack ({selected_level})",
                     color='total_mentions', color_continuous_scale='Reds'
                 )
                 fig_bar.update_layout(yaxis={'categoryorder':'total ascending'}, margin=dict(t=40, b=0, l=0, r=0))

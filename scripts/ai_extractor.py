@@ -1,4 +1,5 @@
 import os
+import sys # ADDED: To read command-line arguments for dynamic source
 import time
 import json
 import duckdb
@@ -9,7 +10,21 @@ from typing import List, Literal
 from dotenv import load_dotenv
 from enum import Enum
 
-print("INITIATING SPRINT 1: AI MASS EXTRACTOR (SILVER LAYER)...")
+# ==========================================
+# 0. DYNAMIC SOURCE CONFIGURATION
+# ==========================================
+# Accept source from terminal (e.g., python ai_extractor.py topcv). Default to 'itviec'.
+TARGET_SOURCE = sys.argv[1].lower() if len(sys.argv) > 1 else 'itviec'
+
+if TARGET_SOURCE not in ['itviec', 'topcv']:
+    print(f"ERROR: Invalid source '{TARGET_SOURCE}'. Please use 'itviec' or 'topcv'.")
+    sys.exit(1)
+
+# Dynamically set table names based on the target source
+RAW_TABLE = f"raw_{TARGET_SOURCE}_jobs"
+SILVER_TABLE = f"silver_all_jobs"
+
+print(f"INITIATING SPRINT 1: AI MASS EXTRACTOR FOR [{TARGET_SOURCE.upper()}] (SILVER LAYER)...")
 
 # 1. SETUP OPENAI API WITH INSTRUCTOR
 load_dotenv()
@@ -24,9 +39,9 @@ client = instructor.from_openai(OpenAI(api_key=OPENAI_API_KEY))
 db_path = '../job_market.duckdb'
 conn = duckdb.connect(db_path)
 
-# Create Silver layer table
-conn.execute("""
-    CREATE TABLE IF NOT EXISTS silver_itviec_jobs (
+# Create Silver layer table dynamically
+conn.execute(f"""
+    CREATE TABLE IF NOT EXISTS {SILVER_TABLE} (
         job_url VARCHAR PRIMARY KEY,
         job_title VARCHAR,
         min_years_of_experience INTEGER,
@@ -34,6 +49,7 @@ conn.execute("""
         english_requirement VARCHAR,
         ai_job_role VARCHAR,
         job_level VARCHAR,
+        source VARCHAR,
         processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 """)
@@ -91,22 +107,27 @@ class JobExtraction(BaseModel):
                 self.job_level = "Senior"
         return self
 
-# 4. IDENTIFY PENDING JOBS (Left Join to find jobs in Raw but not in Silver)
-pending_jobs = conn.execute("""
-    SELECT DISTINCT r.job_url, r.job_title, r.job_description 
-    FROM raw_itviec_jobs r
-    LEFT JOIN silver_itviec_jobs s ON r.job_url = s.job_url
-    WHERE s.job_url IS NULL 
-      AND r.job_description IS NOT NULL
-      AND r.job_description != 'JD content not found'
-      AND r.job_description != 'Connection error'
-""").fetchall()
+# 4. IDENTIFY PENDING JOBS (Left Join to find jobs in dynamically selected Raw but not in Silver)
+try:
+    pending_jobs = conn.execute(f"""
+        SELECT DISTINCT r.job_url, r.job_title, r.job_description 
+        FROM {RAW_TABLE} r
+        LEFT JOIN {SILVER_TABLE} s ON r.job_url = s.job_url
+        WHERE s.job_url IS NULL 
+          AND r.job_description IS NOT NULL
+          AND r.job_description != 'JD content not found'
+          AND r.job_description != 'Connection error'
+    """).fetchall()
+except duckdb.CatalogException:
+    print(f"ERROR: Table {RAW_TABLE} does not exist. Please run the crawl script first.")
+    conn.close()
+    exit()
 
 total_pending = len(pending_jobs)
-print(f" Total jobs to process: {total_pending}\n")
+print(f" Total jobs to process for {TARGET_SOURCE.upper()}: {total_pending}\n")
 
 if total_pending == 0:
-    print("All data has been successfully pushed to the Silver layer. No pending jobs found.")
+    print(f"All data for {TARGET_SOURCE.upper()} has been successfully pushed to the Silver layer. No pending jobs found.")
     conn.close()
     exit()
 
@@ -135,38 +156,39 @@ for index, job in enumerate(pending_jobs):
             max_retries=2 # Magic happens here: If the LLM violates the schema, Instructor catches the error and forces it to fix itself.
         )
         
-        # INSERT directly into Silver layer using dot notation (no more dictionary key lookups)
-        conn.execute("""
-            INSERT INTO silver_itviec_jobs (
+        # INSERT directly into Silver layer using dot notation and f-strings for dynamic tables
+        conn.execute(f"""
+            INSERT INTO {SILVER_TABLE} (
                 job_url, job_title, min_years_of_experience, ai_core_tech_stack, 
-                english_requirement, ai_job_role, job_level
+                english_requirement, ai_job_role, job_level, source
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (job_url) DO NOTHING
         """, (
             job_url, 
             job_title, 
             extracted_data.min_years_of_experience, 
             json.dumps(extracted_data.core_tech_stack), # Storing as a JSON array string for downstream DB analysis
-            extracted_data.english_requirement, 
+            extracted_data.english_requirement.value, # Added .value to safely convert the Enum to a string for the DB
             extracted_data.job_role, 
-            extracted_data.job_level
+            extracted_data.job_level,
+            TARGET_SOURCE.upper()
         ))
         
         success_count += 1
-        print(f"   -> Success: [{extracted_data.job_level}] {extracted_data.job_role}")
+        print(f"-> Success: [{extracted_data.job_level}] {extracted_data.job_role}")
         
     except Exception as e:
-        print(f"   ❌ Failed: {e}")
+        print(f"Failed: {e}")
         # Mark error in the DB to avoid infinite reprocessing loops
-        conn.execute("""
-            INSERT INTO silver_itviec_jobs (job_url, job_title, job_level)
-            VALUES (?, ?, 'Error')
+        conn.execute(f"""
+            INSERT INTO {SILVER_TABLE} (job_url, job_title, job_level, source)
+            VALUES (?, ?, 'Error', ?)
             ON CONFLICT (job_url) DO NOTHING
-        """, (job_url, job_title))
+        """, (job_url, job_title, TARGET_SOURCE.upper()))
 
     # Anti-rate-limit shield
     time.sleep(0.5)
 
-print(f"\nMISSION ACCOMPLISHED! Successfully transferred {success_count}/{total_pending} jobs to the Silver layer.")
+print(f"\nMISSION ACCOMPLISHED! Successfully transferred {success_count}/{total_pending} jobs to {SILVER_TABLE}.")
 conn.close()

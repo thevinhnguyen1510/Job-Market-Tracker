@@ -35,22 +35,27 @@ if not OPENAI_API_KEY:
 # Wrap the standard OpenAI client with Instructor to enforce Pydantic schemas
 client = instructor.from_openai(OpenAI(api_key=OPENAI_API_KEY))
 
+# ==========================================
 # 2. CONNECT TO DUCKDB & SETUP ARCHITECTURE
-db_path = '../job_market.duckdb'
+# ==========================================
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 conn = duckdb.connect(db_path)
 
-# Create Silver layer table dynamically
+# Create Silver layer table dynamically (ĐÃ BỔ SUNG LAST_SEEN_AT VÀ STATUS)
 conn.execute(f"""
     CREATE TABLE IF NOT EXISTS {SILVER_TABLE} (
         job_url VARCHAR PRIMARY KEY,
         job_title VARCHAR,
         min_years_of_experience INTEGER,
-        ai_core_tech_stack VARCHAR, -- Storing as JSON array string for easier UNNEST later
+        ai_core_tech_stack VARCHAR, 
         english_requirement VARCHAR,
         ai_job_role VARCHAR,
         job_level VARCHAR,
         source VARCHAR,
-        processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        status VARCHAR DEFAULT 'Active'
     );
 """)
 
@@ -107,6 +112,16 @@ class JobExtraction(BaseModel):
                 self.job_level = "Senior"
         return self
 
+# 3.5. BULK UPDATE LAST SEEN (PREVENT EXPIRED JOBS)
+    print(f"Updating Last Seen for existing jobs...")
+    conn.execute(f"""
+        UPDATE {SILVER_TABLE}
+        SET last_seen_at = CURRENT_TIMESTAMP, 
+            status = 'Active'
+        WHERE job_url IN (SELECT job_url FROM {RAW_TABLE})
+    """)
+    print("Updated Last Seen for existing jobs. Moving to find new jobs...")
+
 # 4. IDENTIFY PENDING JOBS (Left Join to find jobs in dynamically selected Raw but not in Silver)
 try:
     pending_jobs = conn.execute(f"""
@@ -160,16 +175,17 @@ for index, job in enumerate(pending_jobs):
         conn.execute(f"""
             INSERT INTO {SILVER_TABLE} (
                 job_url, job_title, min_years_of_experience, ai_core_tech_stack, 
-                english_requirement, ai_job_role, job_level, source
+                english_requirement, ai_job_role, job_level, source, last_seen_at, status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (job_url) DO NOTHING
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'Active')
+            ON CONFLICT (job_url) DO UPDATE SET 
+                last_seen_at = EXCLUDED.last_seen_at,
+                status = 'Active'
         """, (
-            job_url, 
-            job_title, 
+            job_url, job_title, 
             extracted_data.min_years_of_experience, 
-            json.dumps(extracted_data.core_tech_stack), # Storing as a JSON array string for downstream DB analysis
-            extracted_data.english_requirement.value, # Added .value to safely convert the Enum to a string for the DB
+            json.dumps(extracted_data.core_tech_stack), 
+            extracted_data.english_requirement.value, 
             extracted_data.job_role, 
             extracted_data.job_level,
             TARGET_SOURCE.upper()
@@ -182,8 +198,8 @@ for index, job in enumerate(pending_jobs):
         print(f"Failed: {e}")
         # Mark error in the DB to avoid infinite reprocessing loops
         conn.execute(f"""
-            INSERT INTO {SILVER_TABLE} (job_url, job_title, job_level, source)
-            VALUES (?, ?, 'Error', ?)
+            INSERT INTO {SILVER_TABLE} (job_url, job_title, job_level, source, status)
+            VALUES (?, ?, 'Error', ?, 'Error')
             ON CONFLICT (job_url) DO NOTHING
         """, (job_url, job_title, TARGET_SOURCE.upper()))
 

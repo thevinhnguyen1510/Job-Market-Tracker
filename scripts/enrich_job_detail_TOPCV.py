@@ -1,26 +1,24 @@
-import duckdb
-from curl_cffi import requests
+# ==========================================
+# PIPELINE 1.5: DEEP DIVE INTO JOB DESCRIPTIONS (CLOUDFLARE BYPASS)
+# ==========================================
+import undetected_chromedriver as uc
 from bs4 import BeautifulSoup
 import time
 import random
 import os
+import duckdb
 from dotenv import load_dotenv
 
-print("ACTIVATING TOPCV PIPELINE 1.5: DEEP DIVE INTO JOB DESCRIPTIONS...")
+print("ACTIVATING TOPCV PIPELINE 1.5: DEEP DIVE INTO JOB DESCRIPTIONS WITH HEAVY WEAPONS...")
 
-# 1. THÊM LOAD COOKIE ĐỂ VƯỢT CLOUDFLARE (Nếu bạn bị 403)
 load_dotenv()
-topcv_cookie = os.getenv('TOPCV_COOKIE', '')
 
-headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Cookie': topcv_cookie
-}
-
-db_path = '../job_market.duckdb'
+# 1. CONNECT TO DATABASE WITH STANDARD PATH (Prevent blind path errors)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 conn = duckdb.connect(db_path)
 
-# 2. ĐỔI TÊN BẢNG THÀNH RAW_TOPCV_JOBS
+# 2. CHECK JOBS NEED DESCRIPTION EXTRACTION
 pending_jobs = conn.execute("""
     SELECT job_url 
     FROM raw_topcv_jobs 
@@ -37,47 +35,67 @@ if total_jobs == 0:
 
 print(f"Found {total_jobs} TopCV jobs needing description extraction.\n")
 
-for index, (job_url,) in enumerate(pending_jobs):
-    print(f"[{index + 1}/{total_jobs}] Extracting details for: {job_url.split('/')[-1][:40]}...")
-    
-    jd_text = ""
-    try:
-        # Thêm timeout và impersonate
-        response = requests.get(job_url, headers=headers, impersonate="chrome110", timeout=15)
+# ==========================================
+# 3. INITIALIZE CHROME DRIVER 146 TO BYPASS 403
+# ==========================================
+options = uc.ChromeOptions()
+# Force using version 146 like the main crawl file
+driver = uc.Chrome(options=options, version_main=146)
+
+try:
+    for index, (job_url,) in enumerate(pending_jobs):
+        print(f"[{index + 1}/{total_jobs}] Extracting: {job_url.split('/')[-1][:40]}...")
         
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, "html.parser")
+        jd_text = ""
+        try:
+            # USE CHROME TO ACCESS JD LINK
+            driver.get(job_url)
             
-            # 3. SỬA ĐOẠN TÌM KIẾM DỰA TRÊN ẢNH CỦA BẠN (DÙNG ID)
-            job_content = soup.find("div", id="box-job-information-detail")
+            # Wait for web to load and bypass Cloudflare Check
+            time.sleep(random.uniform(4.0, 6.0))
             
-            if job_content:
-                jd_text = job_content.get_text(separator="\n", strip=True)
-                # Tối ưu: Cắt bớt phần text quá dài để tiết kiệm tiền API khi chạy file ai_extractor
-                jd_text = jd_text[:3500] 
+            html_source = driver.page_source
+            soup = BeautifulSoup(html_source, "html.parser")
+            
+            # Check if blocked by Captcha/Block
+            if "Access denied" in html_source or "Cloudflare" in soup.title.text:
+                print(f"   -> Blocked by Cloudflare! Resting 15s...")
+                time.sleep(15)
+                jd_text = "Connection error" # Mark for retry next time
             else:
-                jd_text = "JD content not found"
+                # 4. FIND JD CONTENT
+                job_content = soup.find("div", id="box-job-information-detail")
                 
-        else:
-            print(f"   -> Access error: {response.status_code}")
-            jd_text = f"Error {response.status_code}"
-            
-    except Exception as e:
-         print(f"   -> Network crash or error: {e}")
-         jd_text = "Connection error"
+                if job_content:
+                    jd_text = job_content.get_text(separator="\n", strip=True)
+                    # Cut short to save AI costs
+                    jd_text = jd_text[:3500] 
+                else:
+                    print("   -> Detail layout missing or changed.")
+                    jd_text = "JD content not found"
+                
+        except Exception as e:
+            print(f"   -> Network crash or error: {e}")
+            jd_text = "Connection error"
 
-    try:
-        # 4. CẬP NHẬT VÀO BẢNG RAW_TOPCV_JOBS
-        conn.execute("""
-            UPDATE raw_topcv_jobs 
-            SET job_description = ? 
-            WHERE job_url = ?
-        """, (jd_text, job_url))
-    except Exception as e:
-        print(f"-> Error saving to Database: {e}")
+        # 5. SAVE TO DATABASE
+        try:
+            conn.execute("""
+                UPDATE raw_topcv_jobs 
+                SET job_description = ? 
+                WHERE job_url = ?
+            """, (jd_text, job_url))
+        except Exception as e:
+            print(f"   -> Error saving to Database: {e}")
 
-    # 5. TĂNG THỜI GIAN NGỦ ĐỂ TRÁNH BỊ 403 KHI CÀO JD CHI TIẾT
-    time.sleep(random.uniform(3.5, 7.5)) 
+        # 6. ANTI-BAN SHIELD: Rest between jobs
+        sleep_time = random.uniform(4.5, 8.5)
+        time.sleep(sleep_time)
 
-print("\nCompleted! All TopCV Job Descriptions have been safely loaded into the Bronze Layer.")
-conn.close()
+finally:
+    # Close the browser after finishing
+    print("\nClosing Chrome driver...")
+    driver.quit()
+    conn.close()
+    
+print("\nCompleted! All accessible TopCV Job Descriptions have been loaded into the Bronze Layer.")

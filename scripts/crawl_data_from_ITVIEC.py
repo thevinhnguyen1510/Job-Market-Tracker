@@ -143,7 +143,8 @@ if jobs_data:
     print("\nLoading data into Database (Bronze Layer)...")
     
     # Connect to DuckDB
-    db_path = '../job_market.duckdb' # Make sure the path is correct when running with Docker/Airflow
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
     conn = duckdb.connect(db_path)
     
     # 3.1. Ensure table raw_itviec_jobs exists (with PRIMARY KEY to prevent duplicates)

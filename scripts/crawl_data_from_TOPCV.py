@@ -1,6 +1,8 @@
-from curl_cffi import requests
+# ==========================================
+# 1. IMPORTS
+# ==========================================
+import undetected_chromedriver as uc
 from bs4 import BeautifulSoup
-import pandas as pd
 from datetime import datetime
 import os
 import time          
@@ -8,15 +10,13 @@ import random
 import duckdb
 from dotenv import load_dotenv
 
-print("Starting the hunt on TopCV with heavy weapons...")
+print("Starting the hunt on TopCV with heavy weapons (Cloudflare & Trap Bypass)...")
 
 # 1. Download environment variables from the hidden .env file
 load_dotenv()
 
-# 2. Get Cookie from environment variables safely (Optional for TopCV, but good to have)
-# Bạn có thể thêm TOPCV_COOKIE vào file .env nếu TopCV chặn quá gắt
+# Biến cookie và headers giữ nguyên theo code cũ của bạn
 topcv_cookie = os.getenv('TOPCV_COOKIE', '')
-
 headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
@@ -25,7 +25,7 @@ headers = {
 }
 
 keywords = [
-    #'data-engineer', 
+    'data-engineer', 
     'data-analyst', 
     'data-scientist',
     'analytics-engineer', 
@@ -35,29 +35,58 @@ keywords = [
 ]
 jobs_data = []
 
-for keyword in keywords:
-    print(f"\n========== Hunting for: {keyword.upper()} jobs ==========")
-    page = 1
+# ==========================================
+# 2. CREATE CHROME DRIVER TO BYPASS 403
+# ==========================================
+options = uc.ChromeOptions()
+# ÉP DÙNG CHROME 146 ĐỂ TRÁNH LỖI PHIÊN BẢN
+driver = uc.Chrome(options=options, version_main=146)
 
-    while True:
-        print(f"---> Attacking {keyword.upper()} - Page {page}...")
+try:
+    for keyword in keywords:
+        print(f"\n========== Hunting for: {keyword.upper()} jobs ==========")
+        page = 1
         
-        # URL động theo keyword của TopCV
-        url = f"https://www.topcv.vn/tim-viec-lam-{keyword}?page={page}"
-        
-        try:
-            # Add timeout=30 to report error if too slow, instead of hanging the system
-            response = requests.get(url, headers=headers, impersonate="chrome110", timeout=30)
-        except Exception as e:
-            print(f"Network lag or blocked (Timeout) at page {page}: {e}")
-            print("Taking a 10-second break to fool the server and try again...")
-            time.sleep(10)
-            continue # Skip the rest of this loop, go back to crawling this exact page again
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, "html.parser")
+        # BỘ NHỚ TẠM: Lưu các link đã cào để chống bẫy lặp lại của TopCV
+        seen_urls_this_keyword = set()
+
+        while True:
+            print(f"---> Attacking {keyword.upper()} - Page {page}...")
             
-            # 🛑 LƯU Ý: Class của TopCV có thể thay đổi. Thường là 'job-item-2' hoặc chứa 'job-item'
+            # URL dynamically based on keyword of TopCV
+            url = f"https://www.topcv.vn/tim-viec-lam-{keyword}?page={page}"
+            
+            # ----------------------------------------------------
+            # START REGION: BYPASS 403 CLOUDFLARE
+            # ----------------------------------------------------
+            try:
+                # Use real Chrome to open URL instead of requests
+                driver.get(url)
+                
+                # Wait a few seconds for Cloudflare to complete the security check
+                time.sleep(random.uniform(4.5, 6.5))
+                
+                # Get HTML source after web has finished loading
+                html_source = driver.page_source
+                soup = BeautifulSoup(html_source, "html.parser")
+                
+                # Check if there's a Captcha/Block
+                if "Access denied" in html_source or "Cloudflare" in soup.title.text:
+                    print(f"Network lag or blocked (Cloudflare) at page {page}...")
+                    print("Taking a 15-second break to fool the server and try again...")
+                    time.sleep(15)
+                    continue
+                    
+            except Exception as e:
+                print(f"Network lag or blocked (Timeout) at page {page}: {e}")
+                print("Taking a 10-second break to fool the server and try again...")
+                time.sleep(10)
+                continue 
+            # ----------------------------------------------------
+            # END REGION: BYPASS 403 CLOUDFLARE
+            # ----------------------------------------------------
+            
+            # Find Job Cards
             job_cards = soup.find_all("div", class_=lambda x: x and "job-item-search-result" in x.split() if x else False) 
             
             # THE "EMPTY PAGE" SKIP LOGIC: Fail Fast!
@@ -65,32 +94,47 @@ for keyword in keywords:
                 print(f"[!] Page {page} is empty. No more jobs for {keyword.upper()}. Skipping to next keyword...")
                 break 
                 
-            print(f"Captured {len(job_cards)} jobs.")
+            print(f"Found {len(job_cards)} job cards on page. Filtering duplicates...")
+            
+            # Đếm số job THỰC SỰ MỚI trên trang này
+            new_jobs_on_page = 0
             
             # Extract data from each job card
             for card in job_cards:
-                job_info = {
-                    'job_title': '', 'company_name': '', 'location': '', 'salary_raw': '',
-                    'tech_stack': '', 'job_url': '', 'source': 'TopCV',  # ĐỔI SOURCE THÀNH TOPCV
-                    'crawl_timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'experience_level': '', 
-                    'job_category': keyword, 
-                    'job_description': '' # Giữ trống để Pipeline 1.5 xử lý
-                }
-                
                 # --- Get Job Title & Link URL ---
                 try:
                     title_element = card.find("h3") or card.find("a", class_=lambda x: x and "title" in x)
-                    job_info['job_title'] = title_element.text.strip()
+                    job_title = title_element.text.strip()
                     
-                    # Tìm link URL
+                    # Get link URL
                     link = title_element.get('href') if title_element.name == 'a' else card.find("a")['href']
                     if not link.startswith('http'):
                         link = "https://www.topcv.vn" + link
-                    job_info['job_url'] = link
+                        
+                    # 👑 BÍ KÍP MỚI: Chặt đứt đuôi theo dõi (Tracking Parameters)
+                    core_link = link.split('?')[0] 
+                    
                 except:
-                    job_info['job_title'] = "Title extraction error"
-                    job_info['job_url'] = f"error_url_{random.randint(1000,9999)}" # Tránh lỗi Primary Key rỗng
+                    job_title = "Title extraction error"
+                    core_link = f"error_url_{random.randint(1000,9999)}"
+
+                # KIỂM TRA TRÙNG LẶP DỰA TRÊN CORE LINK (LINK GỐC KHÔNG CÓ ĐUÔI)
+                if core_link in seen_urls_this_keyword:
+                    continue
+                
+                # Nếu là link mới -> Lưu vào bộ nhớ và tiếp tục xử lý
+                seen_urls_this_keyword.add(core_link)
+                new_jobs_on_page += 1
+
+                # ⚠️ SỬA LẠI VALUE CỦA job_url THÀNH core_link
+                job_info = {
+                    'job_title': job_title, 'company_name': '', 'location': '', 'salary_raw': '',
+                    'tech_stack': 'To be extracted by AI', 'job_url': core_link, 'source': 'TopCV',
+                    'crawl_timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'experience_level': '', 
+                    'job_category': keyword, 
+                    'job_description': ''
+                }
 
                 # --- Get Company Name ---
                 try:
@@ -101,17 +145,10 @@ for keyword in keywords:
 
                 # --- Get Location ---
                 try:
-                    # TopCV thường để location trong thẻ label có class 'address'
                     location_element = card.find("label", class_=lambda x: x and "address" in x)
                     job_info['location'] = location_element.text.strip() if location_element else "Unknown location"
                 except:
                     job_info['location'] = "Unknown location"
-
-                # --- Get Skills (Tech Stack) - Thường TopCV không hiện rõ ở list, ta để None trước ---
-                try:
-                    job_info['tech_stack'] = "To be extracted by AI"
-                except:
-                    job_info['tech_stack'] = "No tags"
                     
                 # --- Get Salary ---
                 try:
@@ -122,32 +159,42 @@ for keyword in keywords:
 
                 jobs_data.append(job_info)
 
-        else:
-            print(f"Blocked at page {page}! Error code: {response.status_code}")
-            break # Break out of the inner while loop to try the next keyword
-        
-        # ANTI-BAN SHIELD
-        # Sửa từ 3.5 - 6.2 thành 5.5 - 9.5
-        sleep_time = random.uniform(5.5, 9.5)
-        print(f"Resting for {sleep_time:.2f} seconds...")
-        time.sleep(sleep_time)
+            # LOGIC DỪNG CUỘC CHƠI (BẪY PHÂN TRANG)
+            print(f"Captured {new_jobs_on_page} REAL jobs.")
+            if new_jobs_on_page == 0:
+                print(f"[!] Toàn bộ job trên trang {page} đều là lặp lại (Gợi ý). Đã hết kết quả xịn cho {keyword.upper()}!")
+                break # Ngắt luôn vòng lặp, chuyển sang từ khóa tiếp theo
 
-        page += 1
-        
-        # SAFETY NET: Just in case the website bugs out and loops infinitely
-        if page > 50: 
-            print(f"Reached 50 pages for {keyword.upper()}, applying emergency brake!")
-            break
+            # ANTI-BAN SHIELD
+            sleep_time = random.uniform(5.5, 9.5)
+            print(f"Resting for {sleep_time:.2f} seconds...")
+            time.sleep(sleep_time)
 
+            page += 1
+            
+            # SAFETY NET: Just in case the website bugs out and loops infinitely
+            if page > 50: 
+                print(f"Reached 50 pages for {keyword.upper()}, applying emergency brake!")
+                break
+
+finally:
+    # Bắt buộc đóng trình duyệt khi chạy xong
+    print("\nClosing Chrome driver...")
+    driver.quit()
+
+
+# ==========================================
 # 3. LOAD DATA INTO BRONZE LAYER (DUCKDB) WITH DUPLICATE PREVENTION
+# ==========================================
 if jobs_data:
     print("\nLoading data into Database (Bronze Layer)...")
     
-    # Connect to DuckDB
-    db_path = '../job_market.duckdb' 
+    # Ép đường dẫn cố định về file DB ở thư mục gốc để tránh đẻ file lung tung
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
     conn = duckdb.connect(db_path)
     
-    # 3.1. Ensure table raw_topcv_jobs exists (with PRIMARY KEY to prevent duplicates)
+    # Ensure table raw_topcv_jobs exists
     conn.execute("""
         CREATE TABLE IF NOT EXISTS raw_topcv_jobs (
             job_url VARCHAR PRIMARY KEY,
@@ -164,7 +211,7 @@ if jobs_data:
         );
     """)
     
-    # 3.2. Insert data (Skip if job_url already exists)
+    # Insert data (Skip if job_url already exists)
     new_jobs_count = 0
     for job in jobs_data:
         try:
@@ -184,7 +231,6 @@ if jobs_data:
             new_jobs_count += 1 
             
         except Exception as e:
-            # Bỏ qua lỗi duplicate in ra màn hình để terminal sạch sẽ
             if "Constraint Error" not in str(e):
                 print(f"Error inserting job {job['job_title']}: {e}")
             

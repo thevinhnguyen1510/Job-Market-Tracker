@@ -15,12 +15,14 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, Range
 from langchain_core.documents import Document
 from qdrant_client.models import VectorParams, Distance
+import hashlib
+import uuid
 
 # 1. SETUP & CONFIGURATION
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 QDRANT_PATH = "local_qdrant_db" 
-COLLECTION_NAME = "all_it_jobs_v2" 
+COLLECTION_NAME = "all_it_jobs_v3" 
 
 st.set_page_config(page_title="IT Job Market & AI Coach", layout="wide", page_icon="🚀")
 st.title("🚀 IT Job Market Tracker & AI Career Coach")
@@ -318,6 +320,7 @@ with tab2:
                             st.stop()
 
                         job_docs = []
+                        doc_ids = []
                         for _, row in jobs_df.iterrows():
                             content = f"Source: {row['source']} | Title: {row['job_title']} | Tech: {row['ai_core_tech_stack']} | Level: {row['job_level']} | Exp: {row['min_years_of_experience']} years | English: {row['english_requirement']}"
                             job_docs.append(Document(
@@ -330,6 +333,10 @@ with tab2:
                                 }
                             ))
 
+                            # Generate UUID from job URL for safe upsert
+                            hash_id = str(uuid.UUID(hashlib.md5(row['job_url'].encode()).hexdigest()))
+                            doc_ids.append(hash_id)
+
                         client.create_collection(
                             collection_name=COLLECTION_NAME,
                             vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
@@ -340,7 +347,7 @@ with tab2:
                             collection_name=COLLECTION_NAME,
                             embedding=embeddings
                         )
-                        vectorstore.add_documents(job_docs)
+                        vectorstore.add_documents(documents=job_docs, ids=doc_ids)
                     
                     # STEP 3: SEARCH WITH STANDARDIZED QUERY & QDRANT PRE-FILTER
                     status.update(label="4. Finding best candidates using Qdrant Pre-filtering...")

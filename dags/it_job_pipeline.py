@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 # --- 1. SETUP directory & environment ---
 PROJECT_DIR = r"D:\de-job-market-tracker" 
 DBT_DIR = f"{PROJECT_DIR}\\analytics_dbt"
-PYTHON_CMD = f"{PROJECT_DIR}\\.venv\\Scripts\\python.exe"
+PYTHON_CMD = f"{PROJECT_DIR}\\venv\\Scripts\\python.exe"
 
 # --- 2. CONFIG AIRFLOW ---
 default_args = {
@@ -64,7 +64,7 @@ with DAG(
     # --- Phase 4: Analytics (DBT) & Vector Sync ---
     update_metrics = BashOperator(
         task_id='dbt_run_models', 
-        bash_command=f"cd {DBT_DIR} && {PROJECT_DIR}\\.venv\\Scripts\\activate && dbt run"
+        bash_command=f"cd {DBT_DIR} && {PROJECT_DIR}\\venv\\Scripts\\activate && dbt run"
     )
     
     sync_qdrant = BashOperator(

@@ -1,54 +1,82 @@
-from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.operators.bash import BashOperator
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.empty import EmptyOperator
+from datetime import datetime, timedelta
 
-# 1. Configure default arguments
+# --- 1. SETUP directory & environment ---
+PROJECT_DIR = r"D:\de-job-market-tracker" 
+DBT_DIR = f"{PROJECT_DIR}\\analytics_dbt"
+PYTHON_CMD = f"{PROJECT_DIR}\\.venv\\Scripts\\python.exe"
+
+# --- 2. CONFIG AIRFLOW ---
 default_args = {
-    'owner': 'data_engineer',
+    'owner': 'DataEngineer',
     'depends_on_past': False,
-    'start_date': datetime(2023, 10, 1), # Airflow needs a past timestamp to start
-    'email_on_failure': False,
-    'email_on_retry': False,
-    'retries': 1, # If error, try to run again 1 time
-    'retry_delay': timedelta(minutes=5), # Wait 5 minutes before trying again
+    'start_date': datetime(2026, 4, 11),
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
 }
 
-# 2. Initialize DAG (Pipeline script)
 with DAG(
-    'vietnam_it_job_market_etl',
+    'it_job_market_etl_pipeline',
     default_args=default_args,
-    description='Automated Pipeline: Crawl -> AI Enrich -> Analyze',
-    #schedule_interval='@daily', # Schedule: Run 1 time per day at midnight
-    schedule_interval=None,
-    catchup=False,
-    tags=['job_market', 'duckdb', 'openai'],
+    description='End-to-end Job Market Pipeline',
+    schedule_interval='0 2 * * *', # Chạy lúc 2h sáng mỗi ngày
+    catchup=False
 ) as dag:
 
-    # TASK 1: Crawl data (Internet -> Bronze)
-    # Note: Replace 'crawl_itviec.py' with the actual name of your crawl script
-    run_crawler = BashOperator(
-        task_id='crawl_itviec_to_bronze',
-        bash_command='cd /opt/airflow/scripts && python crawl_data.py',
+    # --- Phase 1 & 2: Crawl & Enrich (Parallel) ---
+    crawl_itviec = BashOperator(
+        task_id='crawl_itviec', 
+        bash_command=f'cd {PROJECT_DIR} && {PYTHON_CMD} crawl_data_from_ITVIEC.py'
+    )
+    enrich_itviec = BashOperator(
+        task_id='enrich_itviec', 
+        bash_command=f'cd {PROJECT_DIR} && {PYTHON_CMD} enrich_data_from_ITVIEC.py'
+    )
+    
+    crawl_topcv = BashOperator(
+        task_id='crawl_topcv', 
+        bash_command=f'cd {PROJECT_DIR} && {PYTHON_CMD} crawl_data_from_TOPCV.py'
+    )
+    enrich_topcv = BashOperator(
+        task_id='enrich_topcv', 
+        bash_command=f'cd {PROJECT_DIR} && {PYTHON_CMD} enrich_data_from_TOPCV.py'
     )
 
-    # TASK 1.5: Crawl job details (Internet -> Bronze)
-    run_crawler_details = BashOperator(
-        task_id='crawl_job_details_to_bronze',
-        bash_command='cd /opt/airflow/scripts && python enrich_job_details.py',
+    wait_for_raw_data = EmptyOperator(task_id='wait_for_raw_data')
+
+    # --- Phase 3: AI Extractor (Parallel) & Cleanup ---
+    ai_extract_itviec = BashOperator(
+        task_id='ai_extract_itviec', 
+        bash_command=f'cd {PROJECT_DIR} && {PYTHON_CMD} ai_extractor.py itviec'
+    )
+    ai_extract_topcv = BashOperator(
+        task_id='ai_extract_topcv', 
+        bash_command=f'cd {PROJECT_DIR} && {PYTHON_CMD} ai_extractor.py topcv'
+    )
+    
+    cleanup_expired = BashOperator(
+        task_id='cleanup_expired_jobs', 
+        bash_command=f'cd {PROJECT_DIR} && {PYTHON_CMD} cleanup_jobs.py'
     )
 
-    # TASK 2: Clean / Normalize data using AI (Bronze -> Silver)    
-    run_ai_extractor = BashOperator(
-        task_id='run_ai_enrichment_to_silver',
-        bash_command='cd /opt/airflow/scripts && python ai_extractor.py',
+    # --- Phase 4: Analytics (DBT) & Vector Sync ---
+    update_metrics = BashOperator(
+        task_id='dbt_run_models', 
+        bash_command=f"cd {DBT_DIR} && {PROJECT_DIR}\\.venv\\Scripts\\activate && dbt run"
+    )
+    
+    sync_qdrant = BashOperator(
+        task_id='sync_qdrant_vector_db', 
+        bash_command=f'cd {PROJECT_DIR} && {PYTHON_CMD} sync_qdrant.py'
     )
 
-    # TASK 3: Analyze and generate report (Silver -> Gold)
-    run_market_analysis = BashOperator(
-        task_id='run_market_analysis_to_gold',
-        bash_command='cd /opt/airflow/scripts && python market_insight.py',
-    )
+    crawl_itviec >> enrich_itviec >> wait_for_raw_data
+    crawl_topcv >> enrich_topcv >> wait_for_raw_data
 
-    # 3. Set execution order (River flow)
-    # Crawl done -> Run AI extraction -> Run AI extraction done -> Run analysis
-    run_crawler >> run_crawler_details >> run_ai_extractor >> run_market_analysis
+    wait_for_raw_data >> ai_extract_itviec >> cleanup_expired
+    wait_for_raw_data >> ai_extract_topcv >> cleanup_expired
+
+    cleanup_expired >> update_metrics
+    cleanup_expired >> sync_qdrant

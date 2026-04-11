@@ -4,25 +4,33 @@ import pandas as pd
 import os
 import tempfile
 import re
+import hashlib
+import uuid
 from dotenv import load_dotenv
 import plotly.express as px
 
-# --- LANGCHAIN & QDRANT LIBRARIES ---
+# --- LANGCHAIN CORE & COMMUNITY ---
+from langchain_core.documents import Document
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_qdrant import QdrantVectorStore
+
+# --- QDRANT CORE ---
 from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, Range
-from langchain_core.documents import Document
-from qdrant_client.models import VectorParams, Distance
-import hashlib
-import uuid
+from qdrant_client.models import Filter, FieldCondition, Range, VectorParams, Distance, SparseVectorParams
+
+# --- QDRANT HYBRID SEARCH ---
+from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
+
+# --- RERANKER ---
+from langchain_classic.retrievers import ContextualCompressionRetriever
+from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
+from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 
 # 1. SETUP & CONFIGURATION
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 QDRANT_PATH = "local_qdrant_db" 
-COLLECTION_NAME = "all_it_jobs_v3" 
+COLLECTION_NAME = "all_it_jobs_v5"
 
 st.set_page_config(page_title="IT Job Market & AI Coach", layout="wide", page_icon="🚀")
 st.title("🚀 IT Job Market Tracker & AI Career Coach")
@@ -43,8 +51,8 @@ with tab1:
         # ==========================================
         st.markdown("#### 🌍 1. Macro Market Overview (Market Structure)")
         
-        macro_jobs = conn.execute("SELECT COUNT(*) FROM silver_all_jobs WHERE job_level != 'Error'").fetchone()[0]
-        macro_yoe = conn.execute("SELECT ROUND(AVG(min_years_of_experience), 1) FROM silver_all_jobs WHERE min_years_of_experience IS NOT NULL").fetchone()[0]
+        macro_jobs = conn.execute("SELECT COUNT(*) FROM silver_all_jobs WHERE job_level != 'Error' AND status = 'Active'").fetchone()[0]
+        macro_yoe = conn.execute("SELECT ROUND(AVG(min_years_of_experience), 1) FROM silver_all_jobs WHERE min_years_of_experience IS NOT NULL AND status = 'Active'").fetchone()[0]
         macro_yoe = macro_yoe if macro_yoe is not None else 0 
         
         col_m1, col_m2, col_m3 = st.columns(3)
@@ -58,7 +66,7 @@ with tab1:
             df_levels = conn.execute("""
                 SELECT job_level, COUNT(*) as count 
                 FROM silver_all_jobs 
-                WHERE job_level != 'Error' AND job_level IS NOT NULL 
+                WHERE job_level != 'Error' AND job_level IS NOT NULL AND status = 'Active'
                 GROUP BY job_level
                 ORDER BY count DESC
             """).df()
@@ -76,7 +84,7 @@ with tab1:
             df_yoe_macro = conn.execute("""
                 SELECT min_years_of_experience 
                 FROM silver_all_jobs 
-                WHERE min_years_of_experience IS NOT NULL
+                WHERE min_years_of_experience IS NOT NULL AND status = 'Active'
             """).df()
             if not df_yoe_macro.empty:
                 fig_hist = px.histogram(
@@ -137,7 +145,7 @@ with tab1:
             selected_level = "All Levels"
 
         # 4. Logic SQL Filter
-        filters = []
+        filters = ["status = 'Active'"]
         if selected_source != "All Sources":
             filters.append(f"source = '{selected_source}'")
         if selected_level != "All Levels":
@@ -225,7 +233,7 @@ with tab1:
         conn.close()
 
 # ==========================================
-# TAB 2: AI CAREER COACH (RAG SYSTEM WITH QDRANT)
+# TAB 2: AI CAREER COACH (ENTERPRISE RAG)
 # ==========================================
 with tab2:
     st.subheader("🎯 Upload your CV & Get AI Gap Analysis")
@@ -243,7 +251,11 @@ with tab2:
             with st.status("AI is processing...", expanded=True) as status:
                 try:
                     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
-                    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+                    
+                    # INITIALIZE HYBRID ENGINE (DENSE + SPARSE)
+                    status.update(label="Initializing Hybrid Search Engine...")
+                    embeddings = OpenAIEmbeddings(model="text-embedding-3-small") 
+                    sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
 
                     # STEP 1: READ PDF FILE
                     status.update(label="1. Loading and parsing CV document...")
@@ -288,7 +300,7 @@ with tab2:
                     st.write(f"*(AI estimated experience: **{candidate_yoe} years**)*")
                     st.write(f"*(Optimized Search Query: **{search_query}**)*")
 
-                    # STEP 2: LOAD OR INITIALIZE QDRANT VECTOR DATABASE
+                    # STEP 2: LOAD QDRANT VECTOR DATABASE (READ-ONLY)
                     status.update(label="3. Accessing Qdrant Vector Database...")
                     
                     @st.cache_resource
@@ -297,61 +309,24 @@ with tab2:
                     
                     client = get_qdrant_client()
                     
-                    if client.collection_exists(collection_name=COLLECTION_NAME):
-                        status.update(label="3. Loading Qdrant DB from local storage...")
-                        vectorstore = QdrantVectorStore(
-                            client=client, 
-                            collection_name=COLLECTION_NAME, 
-                            embedding=embeddings
-                        )
-                    else:
-                        status.update(label="3. Building unified Vector DB (First run)...")
-                        conn = duckdb.connect('job_market.duckdb', read_only=True)
-                        query = f"""
-                            SELECT job_url, job_title, ai_core_tech_stack, min_years_of_experience, english_requirement, job_level, source 
-                            FROM silver_all_jobs 
-                            WHERE job_level != 'Error'
-                        """
-                        jobs_df = conn.execute(query).df()
-                        conn.close()
+                    # Strict validation: Make sure Airflow has created the collection before the Web App calls it
+                    if not client.collection_exists(collection_name=COLLECTION_NAME):
+                        st.warning("⚠️ The AI system is currently synchronizing market data. Please check back in a few minutes!")
+                        st.stop()
 
-                        if jobs_df.empty:
-                            st.warning("Database is empty!")
-                            st.stop()
-
-                        job_docs = []
-                        doc_ids = []
-                        for _, row in jobs_df.iterrows():
-                            content = f"Source: {row['source']} | Title: {row['job_title']} | Tech: {row['ai_core_tech_stack']} | Level: {row['job_level']} | Exp: {row['min_years_of_experience']} years | English: {row['english_requirement']}"
-                            job_docs.append(Document(
-                                page_content=content,
-                                metadata={
-                                    "job_title": row['job_title'], 
-                                    "job_url": row['job_url'], 
-                                    "yoe": row['min_years_of_experience'],
-                                    "source": row['source']
-                                }
-                            ))
-
-                            # Generate UUID from job URL for safe upsert
-                            hash_id = str(uuid.UUID(hashlib.md5(row['job_url'].encode()).hexdigest()))
-                            doc_ids.append(hash_id)
-
-                        client.create_collection(
-                            collection_name=COLLECTION_NAME,
-                            vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
-                        )
-                        
-                        vectorstore = QdrantVectorStore(
-                            client=client,
-                            collection_name=COLLECTION_NAME,
-                            embedding=embeddings
-                        )
-                        vectorstore.add_documents(documents=job_docs, ids=doc_ids)
+                    status.update(label="3. Loading Qdrant DB from local storage...")
+                    vectorstore = QdrantVectorStore(
+                        client=client, 
+                        collection_name=COLLECTION_NAME, 
+                        embedding=embeddings,
+                        sparse_embedding=sparse_embeddings, 
+                        retrieval_mode=RetrievalMode.HYBRID 
+                    )
                     
-                    # STEP 3: SEARCH WITH STANDARDIZED QUERY & QDRANT PRE-FILTER
-                    status.update(label="4. Finding best candidates using Qdrant Pre-filtering...")
-                    
+                    # ----------------------------------------------------
+                    # RERANKER
+                    # ----------------------------------------------------
+                    status.update(label="4. Deep Search & Reranking Top 10 matches...")
                     qdrant_filter = Filter(
                         must=[
                             FieldCondition(
@@ -361,10 +336,20 @@ with tab2:
                         ]
                     )
                     
-                    retriever = vectorstore.as_retriever(
-                        search_kwargs={"k": 10, "filter": qdrant_filter} 
+                    # Get 50 Jobs by RRF
+                    base_retriever = vectorstore.as_retriever(
+                        search_kwargs={"k": 50, "filter": qdrant_filter} 
                     )
-                    matched_jobs = retriever.invoke(search_query)
+                    
+                    bge_reranker_model = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
+                    compressor = CrossEncoderReranker(model=bge_reranker_model, top_n=10)
+                    
+                    compression_retriever = ContextualCompressionRetriever(
+                        base_compressor=compressor, 
+                        base_retriever=base_retriever
+                    )
+                    
+                    matched_jobs = compression_retriever.invoke(search_query)
                     
                     if not matched_jobs:
                         st.warning(f"Unfortunately, no jobs found matching {candidate_yoe} years of experience.")

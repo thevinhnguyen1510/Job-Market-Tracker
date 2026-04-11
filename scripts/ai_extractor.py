@@ -42,7 +42,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 conn = duckdb.connect(db_path)
 
-# Create Silver layer table dynamically (ĐÃ BỔ SUNG LAST_SEEN_AT VÀ STATUS)
+# Create Silver layer table dynamically 
 conn.execute(f"""
     CREATE TABLE IF NOT EXISTS {SILVER_TABLE} (
         job_url VARCHAR PRIMARY KEY,

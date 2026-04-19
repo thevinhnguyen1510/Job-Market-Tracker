@@ -1,7 +1,3 @@
-Here is a professional, high-impact **English version** of your `README.md`. I’ve polished the technical terminology to ensure it sounds like a top-tier Engineering project.
-
----
-
 # 🚀 IT Job Market Tracker & AI Career Coach
 
 **An End-to-End Data Engineering Pipeline for Market Intelligence & Enterprise RAG-driven Career Coaching.**

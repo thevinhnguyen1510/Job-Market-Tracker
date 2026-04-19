@@ -9,7 +9,7 @@ conn = duckdb.connect(db_path)
 try:
     # 2. Count the number of Active jobs before cleaning
     active_before = conn.execute("SELECT COUNT(*) FROM silver_all_jobs WHERE status = 'Active'").fetchone()[0]
-    print(f"📊 Number of active jobs: {active_before}")
+    print(f"Number of active jobs: {active_before}")
 
     # 3. Execute the SQL command to clean up
     conn.execute("""

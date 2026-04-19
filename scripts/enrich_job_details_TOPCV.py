@@ -1,7 +1,7 @@
 # ==========================================
-# PIPELINE 1.5: DEEP DIVE INTO JOB DESCRIPTIONS (CLOUDFLARE BYPASS)
+# PIPELINE 1.5: DEEP DIVE INTO JOB DESCRIPTIONS (FLARESOLVERR API EDITION)
 # ==========================================
-from seleniumbase import Driver
+import requests
 from bs4 import BeautifulSoup
 import time
 import random
@@ -9,18 +9,16 @@ import os
 import duckdb
 from dotenv import load_dotenv
 
-print("ACTIVATING TOPCV PIPELINE 1.5: DEEP DIVE INTO JOB DESCRIPTIONS WITH SELENIUMBASE...")
+print("ACTIVATING TOPCV PIPELINE 1.5: FLARESOLVERR EDITION...")
 
 load_dotenv()
 
-# 1. CONNECT TO DATABASE WITH STANDARD PATH (Prevent blind path errors)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 conn = duckdb.connect(db_path)
 
-# 2. CHECK JOBS NEED DESCRIPTION EXTRACTION
 pending_jobs = conn.execute("""
-    SELECT job_url 
+    SELECT job_id, job_url 
     FROM raw_topcv_jobs 
     WHERE job_description IS NULL 
        OR job_description = '' 
@@ -36,73 +34,81 @@ if total_jobs == 0:
 print(f"Found {total_jobs} TopCV jobs needing description extraction.\n")
 
 # ==========================================
-# 3. INITIALIZE SELENIUMBASE TO BYPASS 403
+# FLARESOLVERR CONFIGURATION
 # ==========================================
-driver = Driver(
-    uc=True,              # Enable Undetected Mode (Cloudflare bypass)
-    headless=True,        # Run invisibly in Docker
-    no_sandbox=True,      # Required for Linux/Docker environment
-    browser="chrome"      # Use Chromium core
-)
+# Choose the correct URL based on your Docker setup:
+# If FlareSolverr is in the same docker-compose network: 'http://flaresolverr:8191/v1'
+# If FlareSolverr is standalone and you use Docker Desktop: 'http://host.docker.internal:8191/v1'
+FLARESOLVERR_URL = "http://flaresolverr:8191/v1" 
 
 try:
-    for index, (job_url,) in enumerate(pending_jobs):
-        print(f"[{index + 1}/{total_jobs}] Extracting: {job_url.split('/')[-1][:40]}...")
+    for index, (job_id, job_url) in enumerate(pending_jobs):
+        print(f"[{index + 1}/{total_jobs}] Asking FlareSolverr to extract: {job_url.split('/')[-1][:40]}...")
+        
+        # FlareSolverr Request Payload
+        payload = {
+            "cmd": "request.get",
+            "url": job_url,
+            "maxTimeout": 60000 # Give FlareSolverr up to 60 seconds to bypass the challenge
+        }
         
         jd_text = ""
+        
         try:
-            # USE SELENIUMBASE TO ACCESS JD LINK AND BYPASS CLOUDFLARE
-            driver.uc_open_with_reconnect(job_url, reconnect_time=5)
+            # Send the request to your local FlareSolverr server
+            response = requests.post(
+                FLARESOLVERR_URL, 
+                headers={"Content-Type": "application/json"}, 
+                json=payload
+            )
+            data = response.json()
             
-            # Wait for web to load and bypass Cloudflare Check
-            time.sleep(random.uniform(4.0, 6.0))
-            
-            # Auto-click CAPTCHA if it appears
-            driver.uc_gui_click_captcha()
-            time.sleep(2)
-            
-            html_source = driver.page_source
-            soup = BeautifulSoup(html_source, "html.parser")
-            
-            # Check if blocked by Captcha/Block
-            if "Access denied" in html_source or "Cloudflare" in soup.title.text:
-                print(f"   -> Blocked by Cloudflare! Resting 15s...")
-                time.sleep(15)
-                jd_text = "Connection error" # Mark for retry next time
-            else:
-                # 4. FIND JD CONTENT
-                job_content = soup.find("div", id="box-job-information-detail")
+            # Check if FlareSolverr successfully bypassed Cloudflare
+            if data.get("status") == "ok":
+                html_source = data.get("solution", {}).get("response", "")
+                soup = BeautifulSoup(html_source, "html.parser")
                 
-                if job_content:
-                    jd_text = job_content.get_text(separator="\n", strip=True)
-                    # Cut short to save AI costs
-                    jd_text = jd_text[:3500] 
+                # Check for residual blocks just in case
+                if "Access denied" in html_source or "Cloudflare" in soup.title.text:
+                    print("   -> FlareSolverr returned a page, but it is still blocked.")
+                    jd_text = "Connection error"
                 else:
-                    print("   -> Detail layout missing or changed.")
-                    jd_text = "JD content not found"
+                    # Find JD Content
+                    job_content = soup.find("div", id="box-job-information-detail")
+                    if not job_content:
+                        job_content = soup.find("div", class_="job-description__item") or \
+                                      soup.find("div", class_="box-info-job")
+                    
+                    if job_content:
+                        jd_text = job_content.get_text(separator="\n", strip=True)[:3500]
+                        print("   -> Success! JD Extracted.")
+                    else:
+                        print("   -> Page loaded, but layout missing or changed.")
+                        jd_text = "JD content not found"
+            else:
+                print(f"   -> FlareSolverr failed to solve: {data.get('message')}")
+                jd_text = "Connection error"
                 
-        except Exception as e:
-            print(f"   -> Network crash or error: {e}")
+        except requests.exceptions.RequestException as e:
+            print(f"   -> Could not connect to FlareSolverr: {e}")
+            print("   -> Make sure FlareSolverr is running and accessible at the specified URL.")
             jd_text = "Connection error"
 
-        # 5. SAVE TO DATABASE
+        # Save to Database
         try:
             conn.execute("""
                 UPDATE raw_topcv_jobs 
                 SET job_description = ? 
-                WHERE job_url = ?
-            """, (jd_text, job_url))
+                WHERE job_id = ?
+            """, (jd_text, job_id))
         except Exception as e:
-            print(f"-> Error saving to Database: {e}")
+            print(f"   -> Error saving to Database: {e}")
 
-        # 6. ANTI-BAN SHIELD: Rest between jobs
-        sleep_time = random.uniform(4.5, 8.5)
-        time.sleep(sleep_time)
+        # Be polite to the server, even with FlareSolverr
+        time.sleep(random.uniform(2.5, 4.5))
 
 finally:
-    # Close the browser after finishing
-    print("\nClosing Chrome driver...")
-    driver.quit()
+    print("\nClosing Database connection...")
     conn.close()
     
-print("\nCompleted! All accessible TopCV Job Descriptions have been loaded into the Bronze Layer.")
+print("\nCompleted! All accessible TopCV Job Descriptions have been processed.")

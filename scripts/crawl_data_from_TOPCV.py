@@ -1,7 +1,8 @@
 # ==========================================
-# 1. IMPORTS
+# 1. IMPORTS & CONFIGURATIONS
 # ==========================================
 import shutil
+import re
 from bs4 import BeautifulSoup
 from seleniumbase import Driver
 from sbvirtualdisplay import Display
@@ -14,10 +15,15 @@ from dotenv import load_dotenv
 
 print("Starting the hunt on TopCV with heavy weapons (SeleniumBase UC Mode)...")
 
-# 1. Download environment variables from the hidden .env file
+# Load environment variables from the hidden .env file
 load_dotenv()
 
-# 2. Get cookie và headers 
+# Connect to Database
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
+conn = duckdb.connect(db_path)
+
+# Retrieve cookie and headers (if configured in .env)
 topcv_cookie = os.getenv('TOPCV_COOKIE', '')
 headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -35,38 +41,59 @@ keywords = [
     'ai-engineer',
     'business-intelligence'
 ]
-jobs_data = []
 
 # ==========================================
 # 2. CREATE CHROME DRIVER TO BYPASS CLOUDFLARE
 # ==========================================
 
+# Helper function to initialize a fresh Chrome instance
+def get_new_driver():
+    return Driver(
+        uc=True,
+        headless=False,       # Must be False for PyAutoGUI to work
+        no_sandbox=True,
+        browser="chrome"
+    )
+
+# Start Virtual Display (Xvfb)
+print("Initializing Xvfb virtual display...")
 display = Display(visible=0, size=(1920, 1080))
 display.start()
 
-# Create Chrome driver with SeleniumBase and UC (Undetected Mode)
-driver = Driver(
-    uc=True,              # Turn on Undetected Mode to bypass Cloudflare Turnstile
-    headless=False,            # Run invisibly in Docker
-    no_sandbox=True,      # Required for Linux/Docker
-    browser="chrome"      # Use core Chromium
-)
+# Initialize the first browser session
+driver = get_new_driver()
+
+# Crawl Settings
+MAX_PAGES = 10
+BATCH_SIZE = 5               # Number of pages to scrape before rotating the session
+total_pages_scraped = 0
+global_seen_job_ids = set()
+jobs_data = []               # Master list to hold all extracted jobs
 
 try:
     for keyword in keywords:
         print(f"\n========== Hunting for: {keyword.upper()} jobs ==========")
         page = 1
-        
-        #Save all the link that been crawled for this keyword in current session to prevent duplicates
-        seen_urls_this_keyword = set()
-
         max_retries = 10
         retry_count = 0
 
         while True:
-            print(f"---> Attacking {keyword.upper()} - Page {page}...")
+            # ==========================================
+            # SESSION ROTATION LOGIC (ANTI-BAN MECHANISM)
+            # ==========================================
+            if total_pages_scraped > 0 and total_pages_scraped % BATCH_SIZE == 0:
+                print("\nRotating session: Closing current browser, resting, and launching a fresh instance...")
+                try: driver.quit()
+                except: pass
+                
+                # Cool down period to reset connection behaviors
+                time.sleep(random.uniform(8.0, 12.0))
+                driver = get_new_driver()
+            # ==========================================
+
+            print(f"Attacking {keyword.upper()} - Page {page}...")
             
-            # URL dynamically based on keyword of TopCV
+            # Dynamically build the TopCV URL based on keyword
             url = f"https://www.topcv.vn/tim-viec-lam-{keyword}?page={page}"
             
             # ----------------------------------------------------
@@ -78,16 +105,20 @@ try:
                 
                 # Wait for DOM load and Cloudflare check to complete
                 time.sleep(random.uniform(4.5, 6.5))
+
+                # Force strictly 1920x1080 to match Xvfb (Crucial for PyAutoGUI coordinates)
+                driver.set_window_size(1920, 1080)
+                time.sleep(1)
                 
-                # Auto click into "I am human" if Cloudflare's screen pop up
+                # Auto click into "I am human" if Cloudflare's screen pops up
                 driver.uc_gui_click_captcha()
                 time.sleep(2)
                 
-                # Get HTML source after web has finished loading
+                # Get HTML source after the web has finished loading
                 html_source = driver.page_source
                 soup = BeautifulSoup(html_source, "html.parser")
                 
-                # Fallback check
+                # Fallback check for Cloudflare blocks
                 title_text = soup.title.text if soup.title else ""
                 
                 if "Access denied" in html_source or "Cloudflare" in title_text:
@@ -121,12 +152,12 @@ try:
             # Find Job Cards
             job_cards = soup.find_all("div", class_=lambda x: x and "job-item-search-result" in x.split() if x else False) 
             
-            # THE "EMPTY PAGE" SKIP LOGIC: Fail Fast!
+            # THE "EMPTY PAGE" SKIP LOGIC
             if len(job_cards) == 0:
                 print(f"[!] Page {page} is empty. No more jobs for {keyword.upper()}. Skipping to next keyword...")
                 break
                 
-            print(f"Found {len(job_cards)} job cards on page. Filtering duplicates...")
+            print(f"Found {len(job_cards)} job cards on page {page}. Filtering duplicates...")
             
             # Count number of new jobs on this page
             new_jobs_on_page = 0
@@ -145,20 +176,30 @@ try:
                         
                     # Cut off the query string (Tracking Parameters)
                     core_link = link.split('?')[0] 
+
+                    id_match = re.search(r'/(\d+)\.html', core_link)
+                    job_id = id_match.group(1) if id_match else core_link
                     
                 except:
                     job_title = "Title extraction error"
                     core_link = f"error_url_{random.randint(1000,9999)}"
+                    job_id = core_link
 
-                if core_link in seen_urls_this_keyword:
+                if job_id in global_seen_job_ids:
                     continue
-                
-                seen_urls_this_keyword.add(core_link)
+
+                global_seen_job_ids.add(job_id)
                 new_jobs_on_page += 1
 
                 job_info = {
-                    'job_title': job_title, 'company_name': '', 'location': '', 'salary_raw': '',
-                    'tech_stack': 'To be extracted by AI', 'job_url': core_link, 'source': 'TopCV',
+                    'job_id': job_id,
+                    'job_title': job_title, 
+                    'company_name': '', 
+                    'location': '', 
+                    'salary_raw': '',
+                    'tech_stack': 'To be extracted by AI', 
+                    'job_url': core_link, 
+                    'source': 'TopCV',
                     'crawl_timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     'experience_level': '', 
                     'job_category': keyword, 
@@ -189,8 +230,10 @@ try:
                 jobs_data.append(job_info)
 
             print(f"Captured {new_jobs_on_page} REAL jobs.")
+            total_pages_scraped += 1
+
             if new_jobs_on_page == 0:
-                print(f"[!] Toàn bộ job trên trang {page} đều là lặp lại (Gợi ý). Đã hết kết quả xịn cho {keyword.upper()}!")
+                print(f"[!] All jobs on page {page} are duplicates. Breaking the loop for {keyword.upper()}!")
                 break 
 
             # ANTI-BAN SHIELD
@@ -200,79 +243,42 @@ try:
 
             page += 1
             
-            #Just in case the website bugs out and loops infinitely
-            if page > 50: 
-                print(f"Reached 50 pages for {keyword.upper()}, applying emergency brake!")
+            # Emergency brake in case the website bugs out and loops infinitely
+            if page > MAX_PAGES: 
+                print(f"Reached {MAX_PAGES} pages for {keyword.upper()}, applying emergency brake!")
                 break
 
+    # ==========================================
+    # 3. SAVE DATA TO DUCKDB
+    # ==========================================
+    if jobs_data:
+        print(f"\n[OK] Extraction complete! Preparing to insert {len(jobs_data)} new jobs into DuckDB...")
+        for job in jobs_data:
+            try:
+                conn.execute("""
+                    INSERT INTO raw_topcv_jobs (
+                        job_id, job_url, job_title, company_name, location, 
+                        salary_raw, tech_stack, source, crawl_timestamp, 
+                        experience_level, job_category, job_description
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (job_id) DO NOTHING
+                """, (
+                    job['job_id'], job['job_url'], job['job_title'], job['company_name'], job['location'],
+                    job['salary_raw'], job['tech_stack'], job['source'], job['crawl_timestamp'],
+                    job['experience_level'], job['job_category'], job['job_description']
+                ))
+            except Exception as e:
+                print(f"Error inserting job {job['job_id']}: {e}")
+        print("Data successfully loaded into the Bronze Layer (raw_topcv_jobs)!")
+    else:
+        print("\nNo new jobs to insert.")
+
 finally:
+    # Always clean up background processes
     print("\nClosing Chrome driver and Virtual Display...")
-    try:
-        driver.quit()
-    except:
-        pass
-    try:
-        display.stop()
-    except:
-        pass
-
-
-# ==========================================
-# 3. LOAD DATA INTO BRONZE LAYER (DUCKDB) WITH DUPLICATE PREVENTION
-# ==========================================
-if jobs_data:
-    print("\nLoading data into Database (Bronze Layer)...")
-    
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
-    conn = duckdb.connect(db_path)
-    
-    # Ensure table raw_topcv_jobs exists
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS raw_topcv_jobs (
-            job_url VARCHAR PRIMARY KEY,
-            job_title VARCHAR,
-            company_name VARCHAR,
-            location VARCHAR,
-            salary_raw VARCHAR,
-            tech_stack VARCHAR,
-            source VARCHAR,
-            crawl_timestamp TIMESTAMP,
-            experience_level VARCHAR,
-            job_category VARCHAR,
-            job_description VARCHAR
-        );
-    """)
-    
-    # Insert data (Skip if job_url already exists)
-    new_jobs_count = 0
-    for job in jobs_data:
-        try:
-            conn.execute("""
-                INSERT INTO raw_topcv_jobs (
-                    job_url, job_title, company_name, location, salary_raw, 
-                    tech_stack, source, crawl_timestamp, experience_level, 
-                    job_category, job_description
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (job_url) DO NOTHING;
-            """, (
-                job['job_url'], job['job_title'], job['company_name'], job['location'], 
-                job['salary_raw'], job['tech_stack'], job['source'], job['crawl_timestamp'], 
-                job['experience_level'], job['job_category'], job['job_description']
-            ))
-            
-            new_jobs_count += 1 
-            
-        except Exception as e:
-            if "Constraint Error" not in str(e):
-                print(f"Error inserting job {job['job_title']}: {e}")
-            
-    # Statistics
-    total_raw = conn.execute("SELECT COUNT(*) FROM raw_topcv_jobs").fetchone()[0]
+    try: driver.quit()
+    except: pass
+    try: display.stop()
+    except: pass
     conn.close()
-    
-    print(f" MISSION ACCOMPLISHED!")
-    print(f"   - Number of jobs collected this time: {len(jobs_data)}")
-    print(f"   - Total number of jobs in Database (Bronze Layer - TopCV): {total_raw}")
-else:
-    print("\nMission failed: No data collected.")
+    print("Pipeline finished successfully.")

@@ -1,5 +1,5 @@
 import os
-import sys # ADDED: To read command-line arguments for dynamic source
+import sys 
 import time
 import json
 import duckdb
@@ -13,16 +13,16 @@ from enum import Enum
 # ==========================================
 # 0. DYNAMIC SOURCE CONFIGURATION
 # ==========================================
-# Accept source from terminal (e.g., python ai_extractor.py topcv). Default to 'itviec'.
 TARGET_SOURCE = sys.argv[1].lower() if len(sys.argv) > 1 else 'itviec'
 
 if TARGET_SOURCE not in ['itviec', 'topcv']:
     print(f"ERROR: Invalid source '{TARGET_SOURCE}'. Please use 'itviec' or 'topcv'.")
     sys.exit(1)
 
-# Dynamically set table names based on the target source
-RAW_TABLE = f"raw_{TARGET_SOURCE}_jobs"
-SILVER_TABLE = f"silver_all_jobs"
+INT_TABLE = "int_all_jobs" 
+SILVER_TABLE = "silver_all_jobs"
+
+SOURCE_FILTER = 'ITViec' if TARGET_SOURCE == 'itviec' else 'TopCV'
 
 print(f"INITIATING SPRINT 1: AI MASS EXTRACTOR FOR [{TARGET_SOURCE.upper()}] (SILVER LAYER)...")
 
@@ -32,7 +32,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("ERROR: OPENAI_API_KEY not found in .env file!")
 
-# Wrap the standard OpenAI client with Instructor to enforce Pydantic schemas
 try:
     client = instructor.from_openai(OpenAI(api_key=OPENAI_API_KEY))
 except AttributeError:
@@ -45,10 +44,10 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 conn = duckdb.connect(db_path)
 
-# Create Silver layer table dynamically 
 conn.execute(f"""
     CREATE TABLE IF NOT EXISTS {SILVER_TABLE} (
-        job_url VARCHAR PRIMARY KEY,
+        job_id VARCHAR PRIMARY KEY,  
+        job_url VARCHAR,
         job_title VARCHAR,
         min_years_of_experience INTEGER,
         ai_core_tech_stack VARCHAR, 
@@ -78,7 +77,7 @@ class JobExtraction(BaseModel):
     core_tech_stack: List[str] = Field(
         ..., 
         max_length=5, 
-        description="Max 5 HARD technical skills. Standardize names. Example: ['React', 'Node.js', 'AWS', 'PostgreSQL']." # TỐI ƯU 2: Thêm example
+        description="Max 5 HARD technical skills. Standardize names. Example: ['React', 'Node.js', 'AWS', 'PostgreSQL']." 
     )
     
     english_requirement: EnglishLevel = Field(
@@ -115,29 +114,32 @@ class JobExtraction(BaseModel):
                 self.job_level = "Senior"
         return self
 
-# 3.5. BULK UPDATE LAST SEEN (PREVENT EXPIRED JOBS)
-    print(f"Updating Last Seen for existing jobs...")
-    conn.execute(f"""
-        UPDATE {SILVER_TABLE}
-        SET last_seen_at = CURRENT_TIMESTAMP, 
-            status = 'Active'
-        WHERE job_url IN (SELECT job_url FROM {RAW_TABLE})
-    """)
-    print("Updated Last Seen for existing jobs. Moving to find new jobs...")
+# 3.5. BULK UPDATE LAST SEEN 
+print(f"Updating Last Seen for existing jobs...")
+conn.execute(f"""
+    UPDATE {SILVER_TABLE}
+    SET last_seen_at = CURRENT_TIMESTAMP, 
+        status = 'Active'
+    WHERE job_id IN (
+        SELECT job_id FROM {INT_TABLE} WHERE source = '{SOURCE_FILTER}'
+    )
+""")
+print("Updated Last Seen for existing jobs. Moving to find new jobs...")
 
-# 4. IDENTIFY PENDING JOBS (Left Join to find jobs in dynamically selected Raw but not in Silver)
+# 4. IDENTIFY PENDING JOBS 
 try:
     pending_jobs = conn.execute(f"""
-        SELECT DISTINCT r.job_url, r.job_title, r.job_description 
-        FROM {RAW_TABLE} r
-        LEFT JOIN {SILVER_TABLE} s ON r.job_url = s.job_url
-        WHERE s.job_url IS NULL 
+        SELECT DISTINCT r.job_id, r.job_url, r.job_title, r.job_description 
+        FROM {INT_TABLE} r
+        LEFT JOIN {SILVER_TABLE} s ON r.job_id = s.job_id
+        WHERE s.job_id IS NULL 
+          AND r.source = '{SOURCE_FILTER}'
           AND r.job_description IS NOT NULL
           AND r.job_description != 'JD content not found'
           AND r.job_description != 'Connection error'
     """).fetchall()
 except duckdb.CatalogException:
-    print(f"ERROR: Table {RAW_TABLE} does not exist. Please run the crawl script first.")
+    print(f"ERROR: Table {INT_TABLE} does not exist. Please run dbt model first.")
     conn.close()
     exit()
 
@@ -153,14 +155,13 @@ if total_pending == 0:
 success_count = 0
 
 for index, job in enumerate(pending_jobs):
-    job_url, job_title, job_desc = job
+    job_id, job_url, job_title, job_desc = job 
     print(f"[{index + 1}/{total_pending}] Processing: {job_title[:50]}...")
     
     try:
-        # Instructor handles the function calling, parsing, and retries automatically
         extracted_data = client.chat.completions.create(
             model="gpt-4o-mini",
-            response_model=JobExtraction, # Enforce the Pydantic schema
+            response_model=JobExtraction, 
             messages=[
                 {
                     "role": "system", 
@@ -168,24 +169,23 @@ for index, job in enumerate(pending_jobs):
                 },
                 {
                     "role": "user", 
-                    "content": f"Title: {job_title}\n\n### JOB DESCRIPTION ###\n{job_desc[:3500]}" # Truncate to save tokens if JD is abnormally long
+                    "content": f"Title: {job_title}\n\n### JOB DESCRIPTION ###\n{job_desc[:3500]}" 
                 }
             ],
-            max_retries=2 # Magic happens here: If the LLM violates the schema, Instructor catches the error and forces it to fix itself.
+            max_retries=2 
         )
         
-        # INSERT directly into Silver layer using dot notation and f-strings for dynamic tables
         conn.execute(f"""
             INSERT INTO {SILVER_TABLE} (
-                job_url, job_title, min_years_of_experience, ai_core_tech_stack, 
+                job_id, job_url, job_title, min_years_of_experience, ai_core_tech_stack, 
                 english_requirement, ai_job_role, job_level, source, last_seen_at, status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'Active')
-            ON CONFLICT (job_url) DO UPDATE SET 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'Active')
+            ON CONFLICT (job_id) DO UPDATE SET 
                 last_seen_at = EXCLUDED.last_seen_at,
                 status = 'Active'
         """, (
-            job_url, job_title, 
+            job_id, job_url, job_title, 
             extracted_data.min_years_of_experience, 
             json.dumps(extracted_data.core_tech_stack), 
             extracted_data.english_requirement.value, 
@@ -199,12 +199,11 @@ for index, job in enumerate(pending_jobs):
         
     except Exception as e:
         print(f"Failed: {e}")
-        # Mark error in the DB to avoid infinite reprocessing loops
         conn.execute(f"""
-            INSERT INTO {SILVER_TABLE} (job_url, job_title, job_level, source, status)
-            VALUES (?, ?, 'Error', ?, 'Error')
-            ON CONFLICT (job_url) DO NOTHING
-        """, (job_url, job_title, TARGET_SOURCE.upper()))
+            INSERT INTO {SILVER_TABLE} (job_id, job_url, job_title, job_level, source, status)
+            VALUES (?, ?, ?, 'Error', ?, 'Error')
+            ON CONFLICT (job_id) DO NOTHING
+        """, (job_id, job_url, job_title, TARGET_SOURCE.upper()))
 
     # Anti-rate-limit shield
     time.sleep(0.5)

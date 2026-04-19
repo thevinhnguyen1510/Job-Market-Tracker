@@ -1,6 +1,5 @@
 from curl_cffi import requests
 from bs4 import BeautifulSoup
-import pandas as pd
 from datetime import datetime
 import os
 import time          
@@ -39,6 +38,8 @@ keywords = [
 ]
 jobs_data = []
 
+global_seen_job_ids = set()
+
 for keyword in keywords:
     print(f"\n========== Hunting for: {keyword.upper()} jobs ==========")
     page = 1
@@ -50,45 +51,61 @@ for keyword in keywords:
         url = f"https://itviec.com/it-jobs/{keyword}?page={page}"
         
         try:
-            # Add timeout=30 to report error if too slow, instead of hanging the system
+            # Add timeout=30 to report error if too slow
             response = requests.get(url, headers=headers, impersonate="chrome110", timeout=30)
         except Exception as e:
             print(f"Network lag or blocked (Timeout) at page {page}: {e}")
             print("Taking a 10-second break to fool the server and try again...")
             time.sleep(10)
-            continue # Skip the rest of this loop, go back to crawling this exact page again
+            continue 
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             job_cards = soup.find_all("div", class_="job-card") 
             
-            # THE "EMPTY PAGE" SKIP LOGIC: Fail Fast!
-            # If 0 jobs are found, we've reached the end of this keyword. Break the while loop.
+            # Fail Fast!
             if len(job_cards) == 0:
                 print(f"[!] Page {page} is empty. No more jobs for {keyword.upper()}. Skipping to next keyword...")
                 break 
                 
-            print(f"Captured {len(job_cards)} jobs.")
+            new_jobs_on_page = 0
             
-            # Extract data from each job card
             for card in job_cards:
-                job_info = {
-                    'job_title': '', 'company_name': '', 'location': '', 'salary_raw': '',
-                    'tech_stack': '', 'job_url': '', 'source': 'ITViec', 
-                    'crawl_timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'experience_level': '', 
-                    'job_category': keyword, #Dynamically map the category to the keyword
-                    'job_description': '' 
-                }
-                
                 # --- Get Job Title & Link URL ---
                 try:
                     title_element = card.find("h3") 
-                    job_info['job_title'] = title_element.text.strip()
-                    job_info['job_url'] = title_element.get('data-url', '') 
+                    job_title = title_element.text.strip()
+                    
+                    # ITviec lấy link từ data-url
+                    raw_url = title_element.get('data-url', '') 
+                    if raw_url and not raw_url.startswith('http'):
+                        raw_url = "https://itviec.com" + raw_url
+                        
+                    core_link = raw_url.split('?')[0]
+                    
+                    job_id = core_link
+                    
                 except:
-                    job_info['job_title'] = "Title extraction error"
+                    job_title = "Title extraction error"
+                    core_link = f"error_url_{random.randint(1000,9999)}"
+                    job_id = core_link
 
+                if job_id in global_seen_job_ids:
+                    continue
+                
+                global_seen_job_ids.add(job_id)
+                new_jobs_on_page += 1
+
+                job_info = {
+                    'job_id': job_id,
+                    'job_title': job_title, 'company_name': '', 'location': '', 'salary_raw': '',
+                    'tech_stack': '', 'job_url': core_link, 'source': 'ITViec', 
+                    'crawl_timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'experience_level': '', 
+                    'job_category': keyword, 
+                    'job_description': '' 
+                }
+                
                 # --- Get Company Name ---
                 try:
                     company_span = card.find("span", class_="text-hover-underline")
@@ -122,9 +139,14 @@ for keyword in keywords:
 
                 jobs_data.append(job_info)
 
+            print(f"Captured {new_jobs_on_page} REAL jobs on page {page}.")
+            if new_jobs_on_page == 0:
+                print(f"[!] All the jobs on page {page} are duplicates. Breaking the loop for {keyword.upper()}!")
+                break
+
         else:
             print(f"Blocked at page {page}! Error code: {response.status_code}")
-            break # Break out of the inner while loop to try the next keyword
+            break 
         
         # ANTI-BAN SHIELD
         sleep_time = random.uniform(3.5, 6.2)
@@ -133,7 +155,6 @@ for keyword in keywords:
 
         page += 1
         
-        # Just in case the website bugs out and loops infinitely
         if page > 50: 
             print(f"Reached 50 pages for {keyword.upper()}, applying emergency brake!")
             break
@@ -142,15 +163,15 @@ for keyword in keywords:
 if jobs_data:
     print("\nLoading data into Database (Bronze Layer)...")
     
-    # Connect to DuckDB
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
     conn = duckdb.connect(db_path)
     
-    # 3.1. Ensure table raw_itviec_jobs exists (with PRIMARY KEY to prevent duplicates)
+    # Ensure table raw_itviec_jobs exists (with job_id as PRIMARY KEY)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS raw_itviec_jobs (
-            job_url VARCHAR PRIMARY KEY,
+            job_id VARCHAR PRIMARY KEY,
+            job_url VARCHAR,
             job_title VARCHAR,
             company_name VARCHAR,
             location VARCHAR,
@@ -164,32 +185,27 @@ if jobs_data:
         );
     """)
     
-    # 3.2. Insert data (Skip if job_url already exists)
     new_jobs_count = 0
     for job in jobs_data:
         try:
             conn.execute("""
                 INSERT INTO raw_itviec_jobs (
-                    job_url, job_title, company_name, location, salary_raw, 
+                    job_id, job_url, job_title, company_name, location, salary_raw, 
                     tech_stack, source, crawl_timestamp, experience_level, 
                     job_category, job_description
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (job_url) DO NOTHING;
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (job_id) DO NOTHING;
             """, (
-                job['job_url'], job['job_title'], job['company_name'], job['location'], 
+                job['job_id'], job['job_url'], job['job_title'], job['company_name'], job['location'], 
                 job['salary_raw'], job['tech_stack'], job['source'], job['crawl_timestamp'], 
                 job['experience_level'], job['job_category'], job['job_description']
             ))
-            
-            # If insertion is successful (no duplicate) and cursor changes number of rows
-            # Note: DuckDB returns information via fetchone() for INSERT commands
-            # But for simplicity, we just count the total number of attempts
             new_jobs_count += 1 
             
         except Exception as e:
-            print(f"Error inserting job {job['job_title']}: {e}")
+            if "Constraint Error" not in str(e):
+                print(f"Error inserting job {job['job_title']}: {e}")
             
-    # Statistics
     total_raw = conn.execute("SELECT COUNT(*) FROM raw_itviec_jobs").fetchone()[0]
     conn.close()
     

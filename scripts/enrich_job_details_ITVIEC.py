@@ -3,16 +3,17 @@ from curl_cffi import requests
 from bs4 import BeautifulSoup
 import time
 import random
+import os
 
 print("ACTIVATING PIPELINE 1.5: DEEP DIVE INTO JOB DESCRIPTIONS...")
 
-# 1. Connect to database and find jobs that need description
-db_path = '../job_market.duckdb'
+# 1. Connect to database
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 conn = duckdb.connect(db_path)
 
-# Get URLs where job_description is empty or not crawled yet
 pending_jobs = conn.execute("""
-    SELECT job_url 
+    SELECT job_id, job_url 
     FROM raw_itviec_jobs 
     WHERE job_description IS NULL 
        OR job_description = '' 
@@ -32,7 +33,7 @@ headers = {
 }
 
 # 2. LOOP TO CRAWL DETAILS AND UPDATE DIRECTLY TO DATABASE
-for index, (job_url,) in enumerate(pending_jobs):
+for index, (job_id, job_url) in enumerate(pending_jobs):
     print(f"[{index + 1}/{total_jobs}] Extracting details for: {job_url.split('/')[-1][:40]}...")
     
     jd_text = ""
@@ -56,13 +57,12 @@ for index, (job_url,) in enumerate(pending_jobs):
          print(f"   -> Network crash or error: {e}")
          jd_text = "Connection error"
 
-    # UPDATE BACK TO DUCKDB BASED ON JOB_URL
     try:
         conn.execute("""
             UPDATE raw_itviec_jobs 
             SET job_description = ? 
-            WHERE job_url = ?
-        """, (jd_text, job_url))
+            WHERE job_id = ?
+        """, (jd_text, job_id))
     except Exception as e:
         print(f"-> Error saving to Database: {e}")
 

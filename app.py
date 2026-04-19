@@ -1,3 +1,4 @@
+import warnings
 import streamlit as st
 import duckdb
 import pandas as pd
@@ -26,13 +27,37 @@ from langchain_classic.retrievers import ContextualCompressionRetriever
 from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 
+# ==========================================
+# 0. SUPPRESS ANNOYING WARNINGS
+# ==========================================
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", module="transformers")
+
+# ==========================================
 # 1. SETUP & CONFIGURATION
+# ==========================================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 QDRANT_PATH = "local_qdrant_db" 
-COLLECTION_NAME = "all_it_jobs_v5"
+COLLECTION_NAME = "all_it_jobs_v6"
 
 st.set_page_config(page_title="IT Job Market & AI Coach", layout="wide", page_icon="🚀")
+
+# ==========================================
+# 2. CACHE HEAVY AI MODELS (CRUCIAL FOR SPEED)
+# ==========================================
+@st.cache_resource(show_spinner="Loading Heavy AI Models into Memory (First time only)...")
+def load_ai_models():
+    print("Initializing heavy models (Dense, Sparse, Reranker)...")
+    dense = OpenAIEmbeddings(model="text-embedding-3-small")
+    sparse = FastEmbedSparse(model_name="Qdrant/bm25")
+    reranker = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
+    return dense, sparse, reranker
+
+# Load models globally so they are ready before the user clicks anything
+embeddings, sparse_embeddings, bge_reranker_model = load_ai_models()
+
 st.title("🚀 IT Job Market Tracker & AI Career Coach")
 
 tab1, tab2 = st.tabs(["📊 Market Dashboard", "🤖 AI Career Coach (RAG)"])
@@ -78,7 +103,8 @@ with tab1:
                 )
                 fig_donut.update_traces(textposition='inside', textinfo='percent+label')
                 fig_donut.update_layout(showlegend=False, margin=dict(t=40, b=0, l=0, r=0))
-                st.plotly_chart(fig_donut, use_container_width=True)
+                # Fixed Streamlit warning here
+                st.plotly_chart(fig_donut, width="stretch")
                 
         with macro_col2:
             df_yoe_macro = conn.execute("""
@@ -93,7 +119,8 @@ with tab1:
                     color_discrete_sequence=['#ff4b4b']
                 )
                 fig_hist.update_layout(xaxis_title="Years of Experience", yaxis_title="Number of Jobs", margin=dict(t=40, b=0, l=0, r=0))
-                st.plotly_chart(fig_hist, use_container_width=True)
+                # Fixed Streamlit warning here
+                st.plotly_chart(fig_hist, width="stretch")
 
         st.divider()
 
@@ -102,49 +129,38 @@ with tab1:
         # ==========================================
         st.markdown("#### 🔬 2. Role-Specific Deep Dive (Filterable)")
         
-        # 1. Get data from DB - Filter out empty strings to prevent UI list errors
         raw_sources = conn.execute("SELECT DISTINCT source FROM silver_all_jobs WHERE source IS NOT NULL AND source != '' ORDER BY source").df()['source'].tolist()
         db_levels = conn.execute("SELECT DISTINCT job_level FROM silver_all_jobs WHERE job_level != 'Error' AND job_level IS NOT NULL AND job_level != ''").df()['job_level'].tolist()
 
-        # 2. Create source options
         opt_sources = tuple(["All Sources"] + raw_sources)
 
-        # 3. Normalize level list
         hr_order = ["Intern", "Fresher", "Junior", "Middle", "Senior", "Manager", "Director"]
         valid_db_levels = [lvl for lvl in hr_order if lvl in db_levels]
         extra_levels = [lvl for lvl in db_levels if lvl not in hr_order]
         
         opt_levels = ["All Levels"] + valid_db_levels + extra_levels
 
-        # --- Protection Mechanism (Callback & Session State) ---
-        # This function runs immediately when user clicks any pill
         def enforce_level_selection():
-            # If value is empty (user clicked to deselect), force it back to "All Levels"
             if st.session_state.filter_level_pill is None:
                 st.session_state.filter_level_pill = "All Levels"
 
-        # Initialize default value to "All Levels" so button automatically lights up on first load
         if "filter_level_pill" not in st.session_state:
             st.session_state.filter_level_pill = "All Levels"
 
-        # --- FILTER INTERFACE USING PILLS ---
         st.markdown("##### 🔍 Filter Data")
         
         selected_source = st.selectbox("🌐 Select Data Source:", options=opt_sources)
         
-        # Level using Pills interface, tightly connected to Session State and Callback
         selected_level = st.pills(
             "🎯 Select Job Level:", 
             options=opt_levels, 
-            key="filter_level_pill", # Session state key
-            on_change=enforce_level_selection # Trigger protection function on click
+            key="filter_level_pill",
+            on_change=enforce_level_selection
         )
 
-        # Final safety check for local variable (prevents async errors)
         if not selected_level:
             selected_level = "All Levels"
 
-        # 4. Logic SQL Filter
         filters = ["status = 'Active'"]
         if selected_source != "All Sources":
             filters.append(f"source = '{selected_source}'")
@@ -155,7 +171,6 @@ with tab1:
         if filters:
             global_filter_sql = "AND " + " AND ".join(filters)
             
-        # Update metrics based on filter
         dyn_jobs = conn.execute(f"SELECT COUNT(*) FROM silver_all_jobs WHERE job_level != 'Error' {global_filter_sql}").fetchone()[0]
         dyn_yoe = conn.execute(f"SELECT ROUND(AVG(min_years_of_experience), 1) FROM silver_all_jobs WHERE min_years_of_experience IS NOT NULL {global_filter_sql}").fetchone()[0]
         dyn_yoe = dyn_yoe if dyn_yoe is not None else 0
@@ -198,7 +213,8 @@ with tab1:
                     color='total_mentions', color_continuous_scale='Reds'
                 )
                 fig_bar.update_layout(yaxis={'categoryorder':'total ascending'}, margin=dict(t=40, b=0, l=0, r=0))
-                st.plotly_chart(fig_bar, use_container_width=True)
+                # Fixed Streamlit warning here
+                st.plotly_chart(fig_bar, width="stretch")
             else:
                 st.info("No tech stack data available for this filter.")
 
@@ -225,7 +241,8 @@ with tab1:
                     xaxis_tickangle=-45,
                     margin=dict(t=40, b=0, l=0, r=0)
                 )
-                st.plotly_chart(fig_eng, use_container_width=True)
+                # Fixed Streamlit warning here
+                st.plotly_chart(fig_eng, width="stretch")
 
     except Exception as e:
         st.error(f"Dashboard query error: {e}")
@@ -252,11 +269,6 @@ with tab2:
                 try:
                     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
                     
-                    # INITIALIZE HYBRID ENGINE (DENSE + SPARSE)
-                    status.update(label="Initializing Hybrid Search Engine...")
-                    embeddings = OpenAIEmbeddings(model="text-embedding-3-small") 
-                    sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
-
                     # STEP 1: READ PDF FILE
                     status.update(label="1. Loading and parsing CV document...")
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
@@ -309,12 +321,13 @@ with tab2:
                     
                     client = get_qdrant_client()
                     
-                    # Strict validation: Make sure Airflow has created the collection before the Web App calls it
                     if not client.collection_exists(collection_name=COLLECTION_NAME):
+                        status.update(label="Vector Database not found!", state="error")
                         st.warning("⚠️ The AI system is currently synchronizing market data. Please check back in a few minutes!")
                         st.stop()
 
                     status.update(label="3. Loading Qdrant DB from local storage...")
+                    # Using the globally cached embeddings
                     vectorstore = QdrantVectorStore(
                         client=client, 
                         collection_name=COLLECTION_NAME, 
@@ -336,12 +349,12 @@ with tab2:
                         ]
                     )
                     
-                    # Get 50 Jobs by RRF
+                    # Get 10 Jobs by RRF
                     base_retriever = vectorstore.as_retriever(
-                        search_kwargs={"k": 50, "filter": qdrant_filter} 
+                        search_kwargs={"k": 30, "filter": qdrant_filter} 
                     )
                     
-                    bge_reranker_model = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
+                    # Using the globally cached Reranker model
                     compressor = CrossEncoderReranker(model=bge_reranker_model, top_n=10)
                     
                     compression_retriever = ContextualCompressionRetriever(
@@ -363,6 +376,7 @@ with tab2:
                     prompt = f"""
                     You are a highly analytical and strict HR Director in the IT industry.
                     Below is the candidate's CV and the Top 10 matching jobs (already pre-filtered by experience level).
+                    And makesure their are no duplicated job recommendations between the 10 jobs. If there are, remove the duplicates and only keep unique job recommendations.
 
                     ### CANDIDATE'S ORIGINAL CV:
                     {cv_text[:3500]} 

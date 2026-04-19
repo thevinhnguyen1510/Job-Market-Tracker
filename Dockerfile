@@ -4,13 +4,36 @@ FROM apache/airflow:2.8.1-python3.11
 # 1. SYSTEM DEPENDENCIES 
 # ==========================================
 USER root
+
 RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    chromium \
-    chromium-driver \
+    wget \
+    gnupg \
     xvfb \
+    x11-utils \
+    python3-tk \
+    libx11-xcb1 \
+    libxcomposite1 \
+    libxcursor1 \
+    libxdamage1 \
+    libxi6 \
+    libxtst6 \
+    libnss3 \
+    libcups2 \
+    libxss1 \
+    libxrandr2 \
+    libasound2 \
+    libatk1.0-0 \
+    libgtk-3-0 \
     && apt-get clean
+
+RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor > /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update && apt-get install -y google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN touch /home/airflow/.Xauthority && \
+    chown airflow:root /home/airflow/.Xauthority && \
+    chmod 600 /home/airflow/.Xauthority
 
 # ==========================================
 # 2. PYTHON DEPENDENCIES 
@@ -18,19 +41,16 @@ RUN apt-get update && apt-get install -y \
 USER airflow
 RUN pip install --no-cache-dir --upgrade pip
 
-# Khai báo biến môi trường để trỏ đúng vào danh sách thư viện gốc của Airflow 2.8.1
 ARG AIRFLOW_VERSION=2.8.1
 ARG PYTHON_VERSION=3.11
 ARG CONSTRAINT_URL="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
 
-# BƯỚC 1: Cài đặt Core Airflow & Celery với Constraint nghiêm ngặt
 RUN pip install --no-cache-dir --prefer-binary \
     "apache-airflow==${AIRFLOW_VERSION}" \
     celery==5.3.6 \
     click==8.1.7 \
     --constraint "${CONSTRAINT_URL}"
 
-# BƯỚC 2: Cài đặt các thư viện Data/Scraping/AI bên ngoài (không dùng Constraint)
 RUN pip install --no-cache-dir --prefer-binary \
     duckdb \
     openai \
@@ -40,6 +60,7 @@ RUN pip install --no-cache-dir --prefer-binary \
     pandas \
     curl-cffi \
     "seleniumbase>=4.25.0" \
+    sbvirtualdisplay \
     instructor \
     dbt-duckdb \
     click==8.1.7 \
@@ -48,4 +69,5 @@ RUN pip install --no-cache-dir --prefer-binary \
     langchain \
     langchain-openai \
     langchain-qdrant \
-    fastembed
+    fastembed \
+    pyautogui

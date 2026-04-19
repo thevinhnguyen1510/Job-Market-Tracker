@@ -15,8 +15,9 @@ from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 
 # 1. SETUP CONFIGURATION
 load_dotenv()
-QDRANT_PATH = "local_qdrant_db" 
-COLLECTION_NAME = "all_it_jobs_v5"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+QDRANT_PATH = os.path.join(BASE_DIR, 'local_qdrant_db')
+COLLECTION_NAME = "all_it_jobs_v6" 
 
 print("INITIATING QDRANT VECTOR DB AUTO-SYNC...")
 
@@ -49,8 +50,8 @@ vectorstore = QdrantVectorStore(
 )
 
 # 2. CONNECT TO DUCKDB (Read-Only Mode)
-#BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-db_path = '/opt/airflow/job_market.duckdb'
+# [FIXED]: Using dynamic cross-platform path instead of hardcoded Docker path
+db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 conn = duckdb.connect(db_path, read_only=True)
 
 # ========================================================
@@ -58,14 +59,14 @@ conn = duckdb.connect(db_path, read_only=True)
 # ========================================================
 if not is_first_run:
     inactive_jobs_df = conn.execute("""
-        SELECT job_url FROM silver_all_jobs
+        SELECT job_id FROM silver_all_jobs
         WHERE status = 'Inactive' 
           AND last_seen_at >= CURRENT_DATE - INTERVAL 2 DAY
     """).df()
 
     if not inactive_jobs_df.empty:
         print(f"Found {len(inactive_jobs_df)} expired jobs. Deleting from Qdrant...")
-        delete_ids = [str(uuid.UUID(hashlib.md5(url.encode()).hexdigest())) for url in inactive_jobs_df['job_url']]
+        delete_ids = [str(uuid.UUID(hashlib.md5(str(j_id).encode()).hexdigest())) for j_id in inactive_jobs_df['job_id']]
         client.delete(collection_name=COLLECTION_NAME, points_selector=delete_ids)
         print("   [OK] Cleanup completed!")
 
@@ -95,13 +96,15 @@ else:
         job_docs.append(Document(
             page_content=content,
             metadata={
+                "job_id": row['job_id'],      
                 "job_title": row['job_title'], 
                 "job_url": row['job_url'], 
                 "yoe": row['min_years_of_experience'],
                 "source": row['source']
             }
         ))
-        hash_id = str(uuid.UUID(hashlib.md5(row['job_url'].encode()).hexdigest()))
+        
+        hash_id = str(uuid.UUID(hashlib.md5(str(row['job_id']).encode()).hexdigest()))
         doc_ids.append(hash_id)
 
     # add_documents acts as an UPSERT in Qdrant based on the provided IDs

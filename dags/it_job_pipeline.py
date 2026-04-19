@@ -3,12 +3,16 @@ from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
 from datetime import datetime, timedelta
 
-# --- 1. SETUP directory & environment---
+# ==========================================
+# 1. SETUP DIRECTORY & ENVIRONMENT
+# ==========================================
 SCRIPTS_DIR = "/opt/airflow/scripts"
 DBT_DIR = "/opt/airflow/analytics_dbt"
 PYTHON_CMD = "python" 
 
-# --- 2. CONFIG AIRFLOW ---
+# ==========================================
+# 2. CONFIG AIRFLOW
+# ==========================================
 default_args = {
     'owner': 'DataEngineer',
     'depends_on_past': False,
@@ -25,7 +29,9 @@ with DAG(
     catchup=False
 ) as dag:
 
-    # --- Phase 1 & 2: Crawl & Enrich (Parallel) ---
+    # ==========================================
+    # PHASE 1 & 2: CRAWL & ENRICH (RAW LAYER)
+    # ==========================================
     crawl_itviec = BashOperator(
         task_id='crawl_itviec', 
         bash_command=f'cd {SCRIPTS_DIR} && {PYTHON_CMD} crawl_data_from_ITVIEC.py'
@@ -44,9 +50,20 @@ with DAG(
         bash_command=f'cd {SCRIPTS_DIR} && {PYTHON_CMD} enrich_job_details_TOPCV.py'
     )
 
+    # Dummy operator acting as a checkpoint for the Raw Layer
     wait_for_raw_data = EmptyOperator(task_id='wait_for_raw_data')
 
-    # --- Phase 3: AI Extractor (Parallel) & Cleanup ---
+    # ==========================================
+    # PHASE 2.5: DBT STAGING & INTERMEDIATE 
+    # ==========================================
+    dbt_build_int = BashOperator(
+        task_id='dbt_build_int',
+        bash_command=f'cd {DBT_DIR} && dbt run --select staging intermediate'
+    )
+
+    # ==========================================
+    # PHASE 3: AI EXTRACTOR (SILVER LAYER) & CLEANUP
+    # ==========================================
     ai_extract_itviec = BashOperator(
         task_id='ai_extract_itviec', 
         bash_command=f'cd {SCRIPTS_DIR} && {PYTHON_CMD} ai_extractor.py itviec'
@@ -61,10 +78,13 @@ with DAG(
         bash_command=f'cd {SCRIPTS_DIR} && {PYTHON_CMD} cleanup_jobs.py'
     )
 
-    # --- Phase 4: Analytics (DBT) & Vector Sync ---
+    # ==========================================
+    # PHASE 4: ANALYTICS (GOLD LAYER) & VECTOR SYNC
+    # ==========================================
+    # Only run the 'gold' models here to save execution time
     update_metrics = BashOperator(
-        task_id='dbt_run_models', 
-        bash_command=f"cd {DBT_DIR} && dbt run"
+        task_id='dbt_run_models_gold', 
+        bash_command=f"cd {DBT_DIR} && dbt run --select gold"
     )
     
     sync_qdrant = BashOperator(
@@ -72,12 +92,18 @@ with DAG(
         bash_command=f'cd {SCRIPTS_DIR} && {PYTHON_CMD} sync_qdrant.py'
     )
 
-    # --- Workflow (Dependencies) ---
-    # 1. RAW LAYER (CRAWL & ENRICH)
+    # ==========================================
+    # WORKFLOW / DEPENDENCIES DEFINITION
+    # ==========================================
+    
+    # 1. RAW LAYER: Strictly sequential to prevent DuckDB concurrency write locks
     crawl_itviec >> enrich_itviec >> crawl_topcv >> enrich_topcv >> wait_for_raw_data
 
-    # 2. SILVER LAYER (AI EXTRACTION)
-    wait_for_raw_data >> ai_extract_itviec >> ai_extract_topcv >> cleanup_expired
+    # 2. DBT INTEGRATION: Runs only after all raw data is safely landed
+    wait_for_raw_data >> dbt_build_int
 
-    # 3. DOWNSTREAM LAYER (METRICS & VECTOR DB)
+    # 3. SILVER LAYER: Sequential extraction to avoid database locking
+    dbt_build_int >> ai_extract_itviec >> ai_extract_topcv >> cleanup_expired
+
+    # 4. DOWNSTREAM LAYER: Finalize metrics and update vector search engine
     cleanup_expired >> update_metrics >> sync_qdrant

@@ -1,0 +1,14 @@
+version: 2
+
+sources:
+  - name: raw
+    description: "Raw data scraped from job portals"
+    schema: main  # This is the default schema used by DuckDB
+    tables:
+      - name: itviec_jobs
+        identifier: raw_itviec_jobs  # Maps the dbt name to the actual DuckDB table
+        description: "Raw ITviec job postings"
+
+      - name: topcv_jobs
+        identifier: raw_topcv_jobs   # Maps the dbt name to the actual DuckDB table
+        description: "Raw TopCV job postings"

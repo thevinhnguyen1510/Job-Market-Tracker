@@ -46,7 +46,7 @@ for keyword in keywords:
     while True:
         print(f"---> Attacking {keyword.upper()} - Page {page}...")
         
-        # FIX 1: Make URL dynamic based on the current keyword in the loop
+        # Make URL dynamic based on the current keyword in the loop
         url = f"https://itviec.com/it-jobs/{keyword}?page={page}"
         
         try:
@@ -77,7 +77,7 @@ for keyword in keywords:
                     'tech_stack': '', 'job_url': '', 'source': 'ITViec', 
                     'crawl_timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     'experience_level': '', 
-                    'job_category': keyword, # FIX 2: Dynamically map the category to the keyword
+                    'job_category': keyword, #Dynamically map the category to the keyword
                     'job_description': '' 
                 }
                 
@@ -133,7 +133,7 @@ for keyword in keywords:
 
         page += 1
         
-        # SAFETY NET: Just in case the website bugs out and loops infinitely
+        # Just in case the website bugs out and loops infinitely
         if page > 50: 
             print(f"Reached 50 pages for {keyword.upper()}, applying emergency brake!")
             break

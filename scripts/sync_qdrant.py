@@ -18,7 +18,7 @@ load_dotenv()
 QDRANT_PATH = "local_qdrant_db" 
 COLLECTION_NAME = "all_it_jobs_v5"
 
-print("🚀 INITIATING QDRANT VECTOR DB AUTO-SYNC...")
+print("INITIATING QDRANT VECTOR DB AUTO-SYNC...")
 
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
@@ -30,7 +30,7 @@ client = QdrantClient(path=QDRANT_PATH)
 # ========================================================
 is_first_run = False
 if not client.collection_exists(collection_name=COLLECTION_NAME):
-    print("🏗️ First run detected: Auto-initializing Hybrid Search structure...")
+    print("First run detected: Auto-initializing Hybrid Search structure...")
     client.create_collection(
         collection_name=COLLECTION_NAME,
         vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
@@ -49,8 +49,8 @@ vectorstore = QdrantVectorStore(
 )
 
 # 2. CONNECT TO DUCKDB (Read-Only Mode)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
+#BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+db_path = '/opt/airflow/job_market.duckdb'
 conn = duckdb.connect(db_path, read_only=True)
 
 # ========================================================
@@ -64,7 +64,7 @@ if not is_first_run:
     """).df()
 
     if not inactive_jobs_df.empty:
-        print(f"🧹 Found {len(inactive_jobs_df)} expired jobs. Deleting from Qdrant...")
+        print(f"Found {len(inactive_jobs_df)} expired jobs. Deleting from Qdrant...")
         delete_ids = [str(uuid.UUID(hashlib.md5(url.encode()).hexdigest())) for url in inactive_jobs_df['job_url']]
         client.delete(collection_name=COLLECTION_NAME, points_selector=delete_ids)
         print("   [OK] Cleanup completed!")
@@ -74,19 +74,19 @@ if not is_first_run:
 # ========================================================
 if is_first_run:
     # First run: Fetch ALL Active jobs
-    print("📦 Executing Initial Full Load...")
+    print("Executing Initial Full Load...")
     sql_query = "SELECT * FROM silver_all_jobs WHERE status = 'Active'"
 else:
     # Daily run: Fetch ONLY NEW jobs from today
-    print("⏳ Executing Daily Incremental Upsert...")
+    print("Executing Daily Incremental Upsert...")
     sql_query = "SELECT * FROM silver_all_jobs WHERE status = 'Active' AND DATE(processed_at) = CURRENT_DATE"
 
 jobs_df = conn.execute(sql_query).df()
 
 if jobs_df.empty:
-    print("🤷‍♂️ No data to sync today.")
+    print("No data to sync today.")
 else:
-    print(f"✨ Found {len(jobs_df)} jobs. Calling OpenAI for Embeddings...")
+    print(f"Found {len(jobs_df)} jobs. Calling OpenAI for Embeddings...")
     job_docs = []
     doc_ids = []
     
@@ -104,9 +104,9 @@ else:
         hash_id = str(uuid.UUID(hashlib.md5(row['job_url'].encode()).hexdigest()))
         doc_ids.append(hash_id)
 
-    # 💥 add_documents acts as an UPSERT in Qdrant based on the provided IDs
+    # add_documents acts as an UPSERT in Qdrant based on the provided IDs
     vectorstore.add_documents(documents=job_docs, ids=doc_ids)
     print(f"   [OK] Successfully synced {len(jobs_df)} Vectors into the Hybrid space!")
 
 conn.close()
-print("\n🎉 VECTOR DB SYNC COMPLETED.")
+print("\nVECTOR DB SYNC COMPLETED.")

@@ -1,7 +1,7 @@
 import os
 import duckdb
 
-print("🧹 INITIATING: GLOBAL CLEANUP (MARKING EXPIRED JOBS AS INACTIVE)...")
+print("INITIATING: GLOBAL CLEANUP (MARKING EXPIRED JOBS AS INACTIVE)...")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
@@ -36,7 +36,7 @@ try:
     except duckdb.CatalogException:
         print("   [SKIP] Table raw_topcv_jobs does not exist yet.")
 
-    print("\n✅ MISSION ACCOMPLISHED! All expired jobs successfully hidden.")
+    print("\nAll expired jobs successfully hidden.")
 
 except Exception as e:
     print(f"System Error during cleanup: {e}")

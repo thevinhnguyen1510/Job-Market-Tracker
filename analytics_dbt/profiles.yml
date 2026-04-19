@@ -1,0 +1,7 @@
+analytics_dbt:
+  outputs:
+    dev:
+      type: duckdb
+      path: /opt/airflow/job_market.duckdb
+      threads: 4
+  target: dev

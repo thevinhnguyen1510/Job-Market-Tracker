@@ -1,7 +1,7 @@
 # ==========================================
 # PIPELINE 1.5: DEEP DIVE INTO JOB DESCRIPTIONS (CLOUDFLARE BYPASS)
 # ==========================================
-import undetected_chromedriver as uc
+from seleniumbase import Driver
 from bs4 import BeautifulSoup
 import time
 import random
@@ -9,7 +9,7 @@ import os
 import duckdb
 from dotenv import load_dotenv
 
-print("ACTIVATING TOPCV PIPELINE 1.5: DEEP DIVE INTO JOB DESCRIPTIONS WITH HEAVY WEAPONS...")
+print("ACTIVATING TOPCV PIPELINE 1.5: DEEP DIVE INTO JOB DESCRIPTIONS WITH SELENIUMBASE...")
 
 load_dotenv()
 
@@ -36,11 +36,14 @@ if total_jobs == 0:
 print(f"Found {total_jobs} TopCV jobs needing description extraction.\n")
 
 # ==========================================
-# 3. INITIALIZE CHROME DRIVER 146 TO BYPASS 403
+# 3. INITIALIZE SELENIUMBASE TO BYPASS 403
 # ==========================================
-options = uc.ChromeOptions()
-# Force using version 146 like the main crawl file
-driver = uc.Chrome(options=options, version_main=146)
+driver = Driver(
+    uc=True,              # Enable Undetected Mode (Cloudflare bypass)
+    headless=True,        # Run invisibly in Docker
+    no_sandbox=True,      # Required for Linux/Docker environment
+    browser="chrome"      # Use Chromium core
+)
 
 try:
     for index, (job_url,) in enumerate(pending_jobs):
@@ -48,11 +51,15 @@ try:
         
         jd_text = ""
         try:
-            # USE CHROME TO ACCESS JD LINK
-            driver.get(job_url)
+            # USE SELENIUMBASE TO ACCESS JD LINK AND BYPASS CLOUDFLARE
+            driver.uc_open_with_reconnect(job_url, reconnect_time=5)
             
             # Wait for web to load and bypass Cloudflare Check
             time.sleep(random.uniform(4.0, 6.0))
+            
+            # Auto-click CAPTCHA if it appears
+            driver.uc_gui_click_captcha()
+            time.sleep(2)
             
             html_source = driver.page_source
             soup = BeautifulSoup(html_source, "html.parser")
@@ -86,7 +93,7 @@ try:
                 WHERE job_url = ?
             """, (jd_text, job_url))
         except Exception as e:
-            print(f"   -> Error saving to Database: {e}")
+            print(f"-> Error saving to Database: {e}")
 
         # 6. ANTI-BAN SHIELD: Rest between jobs
         sleep_time = random.uniform(4.5, 8.5)

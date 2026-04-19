@@ -33,7 +33,10 @@ if not OPENAI_API_KEY:
     raise ValueError("ERROR: OPENAI_API_KEY not found in .env file!")
 
 # Wrap the standard OpenAI client with Instructor to enforce Pydantic schemas
-client = instructor.from_openai(OpenAI(api_key=OPENAI_API_KEY))
+try:
+    client = instructor.from_openai(OpenAI(api_key=OPENAI_API_KEY))
+except AttributeError:
+    client = instructor.patch(OpenAI(api_key=OPENAI_API_KEY))
 
 # ==========================================
 # 2. CONNECT TO DUCKDB & SETUP ARCHITECTURE

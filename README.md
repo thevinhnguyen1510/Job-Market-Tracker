@@ -8,34 +8,38 @@ This project is a comprehensive system designed to crawl, process, and analyze t
 
 ## 🏗️ System Architecture
 
-The system is built on a robust 4-layer architecture:
+The system is built on a robust, modern 4-tier data architecture. Below is the high-level workflow of the pipeline:
 
-### 1. Data Ingestion Layer
-* **Sources:** ITViec & TopCV.
-* **Tech:** Python (`curl_cffi`, `requests`).
-* **Feature:** Implements **Asymmetric Scraping** and TLS Fingerprinting to bypass Cloudflare Turnstile anti-bot systems on TopCV with high efficiency.
+```mermaid
+graph TD
+    subgraph 1. Ingestion Layer
+        A[ITViec] -->|Asymmetric Scraping & TLS Fingerprinting| C(Python Crawlers)
+        B[TopCV] -->|Asymmetric Scraping & TLS Fingerprinting| C
+    end
 
-### 2. Data Processing & Storage Layer
-* **Orchestration:** **Apache Airflow**. Manages and monitors daily automated ETL pipelines.
-* **Data Warehouse:** **DuckDB**. A high-performance analytical database using columnar storage.
-* **Hybrid Transformation Strategy:** * **Python AI Parsing:** Leverages LLMs to parse complex, unstructured Job Descriptions into structured data (Tech Stack, Years of Experience (YOE), and English requirements).
-    * **dbt (Data Build Tool):** Implements a **Medallion Architecture**-inspired modeling flow:
-        * **Staging:** Standardizes raw data from various sources (`stg_itviec_jobs`, `stg_topcv_jobs`).
-        * **Intermediate:** Joins and unions multi-source data into a unified schema (`int_all_jobs`).
-        * **Marts (Gold):** Aggregates business-ready metrics (`gold_tech_stack_counts`, `gold_role_summary`) for the Dashboard.
-* **Data Maintenance:** Automated `cleanup_jobs.py` script to identify and mark "Inactive" expired postings.
+    subgraph 2. Processing & Storage Layer
+        C -->|Raw Data| D[(DuckDB)]
+        D -->|Staging & Intermediate| E{dbt: Silver Layer}
+        E -->|Unstructured Text| F[OpenAI API Enrichment]
+        F -->|Structured Entities| D
+        D -->|Aggregations| G{dbt: Gold Layer}
+    end
 
-### 3. AI Data Preparation (Vector DB)
-* **Technology:** **Qdrant** (Vector Database).
-* **Sync Logic:** Daily incremental synchronization from DuckDB to Qdrant.
-* **Search Engine:** Implements **Hybrid Search** combining Dense Vectors (OpenAI Embeddings) and Sparse Vectors (BM25) for superior retrieval accuracy.
+    subgraph 3. AI Data Preparation
+        G -->|Incremental Sync| H[(Qdrant Vector DB)]
+    end
 
-### 4. Application Layer
-* **Framework:** **Streamlit**.
-* **Dashboard:** Interactive market intelligence visualized via **Plotly** (Top Tech Stacks, Job Levels, Language Requirements).
-* **AI Career Coach:** An advanced RAG pipeline that integrates a **Cross-Encoder Reranker** (`BAAI/bge-reranker-base`) for precise CV-to-JD matching and Gap Analysis.
+    subgraph 4. Application Layer
+        G -->|Metrics| I[Streamlit Dashboard / Plotly]
+        H -->|Hybrid Search & Reranker| J[AI Career Coach / RAG]
+    end
 
----
+    %% Airflow Orchestration
+    K((Apache Airflow <br> Orchestrator)) -.- C
+    K -.- E
+    K -.- F
+    K -.- G
+    K -.- H
 
 ## 🛠️ Tech Stack
 

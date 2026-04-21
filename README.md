@@ -40,7 +40,7 @@ graph TD
     K -.- F
     K -.- G
     K -.- H
-
+```
 ## 🛠️ Tech Stack
 
 | Category | Tools |

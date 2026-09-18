@@ -5,9 +5,10 @@ WITH unnested_skills AS (
         job_id,
         source,
         UNNEST(from_json(ai_core_tech_stack, '["VARCHAR"]')) AS skill
-    FROM silver_all_jobs
+    FROM {{ source('silver', 'all_jobs') }}
     WHERE ai_core_tech_stack IS NOT NULL
       AND ai_core_tech_stack != '[]'
+      AND status = 'Active'
 )
 
 SELECT 

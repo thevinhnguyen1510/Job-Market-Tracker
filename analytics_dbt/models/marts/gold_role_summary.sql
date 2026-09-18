@@ -5,9 +5,10 @@ WITH base_data AS (
         ai_job_role AS job_role,
         source,
         min_years_of_experience
-    FROM silver_all_jobs
+    FROM {{ source('silver', 'all_jobs') }} 
     WHERE ai_job_role != 'Unknown' 
       AND ai_job_role != 'Error'
+      AND status = 'Active'
 )
 
 SELECT 

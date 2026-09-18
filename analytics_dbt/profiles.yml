@@ -2,6 +2,7 @@ analytics_dbt:
   outputs:
     dev:
       type: duckdb
-      path: /opt/airflow/job_market.duckdb
+      # Nếu có biến môi trường DUCKDB_PATH thì lấy (Docker), nếu không thì lùi 1 cấp thư mục (Local Windows)
+      path: "{{ env_var('DUCKDB_PATH', '../job_market.duckdb') }}"
       threads: 4
   target: dev

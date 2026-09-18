@@ -58,10 +58,11 @@ RUN pip install --no-cache-dir --prefer-binary \
     requests \
     beautifulsoup4 \
     pandas \
+    pyarrow \
     curl-cffi \
     "seleniumbase>=4.25.0" \
     sbvirtualdisplay \
-    instructor \
+    "instructor>=1.3.0" \
     dbt-duckdb \
     click==8.1.7 \
     qdrant-client \

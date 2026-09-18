@@ -45,18 +45,20 @@ COLLECTION_NAME = "all_it_jobs_v6"
 st.set_page_config(page_title="IT Job Market & AI Coach", layout="wide", page_icon="🚀")
 
 # ==========================================
-# 2. CACHE HEAVY AI MODELS (CRUCIAL FOR SPEED)
+# 2. CACHE AI MODELS (CRUCIAL FOR SPEED)
 # ==========================================
-@st.cache_resource(show_spinner="Loading Heavy AI Models into Memory (First time only)...")
-def load_ai_models():
-    print("Initializing heavy models (Dense, Sparse, Reranker)...")
+@st.cache_resource(show_spinner=False)
+def load_embedding_models():
     dense = OpenAIEmbeddings(model="text-embedding-3-small")
     sparse = FastEmbedSparse(model_name="Qdrant/bm25")
-    reranker = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
-    return dense, sparse, reranker
+    return dense, sparse
 
-# Load models globally so they are ready before the user clicks anything
-embeddings, sparse_embeddings, bge_reranker_model = load_ai_models()
+@st.cache_resource(show_spinner="Loading Cross-Encoder Reranker (~450MB)...")
+def get_reranker_model():
+    return HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
+
+# Only load lightweight embeddings globally so dashboard loads instantly
+embeddings, sparse_embeddings = load_embedding_models()
 
 st.title("🚀 IT Job Market Tracker & AI Career Coach")
 
@@ -69,7 +71,9 @@ with tab1:
     st.markdown("### 📊 IT Market Intelligence Dashboard")
     st.markdown("Data is automatically extracted, standardized, and visualized directly from the **Silver Data Layer** (ITviec & TopCV).")
     
-    conn = duckdb.connect('job_market.duckdb', read_only=True)
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
+    conn = duckdb.connect(db_path, read_only=True)
     try:
         # ==========================================
         # SECTION 1: MACRO OVERVIEW (STATIC)
@@ -259,160 +263,196 @@ with tab2:
     uploaded_cv = st.file_uploader("Upload CV (PDF format only)", type=["pdf"])
     
     if uploaded_cv is not None:
-        if st.button("Analyze CV & Match Jobs", type="primary"):
-            
+        cv_bytes = uploaded_cv.getvalue()
+        cv_hash = hashlib.md5(cv_bytes).hexdigest()
+
+        # Initialize session state cache for CV analysis
+        if "last_cv_hash" not in st.session_state:
+            st.session_state.last_cv_hash = None
+            st.session_state.cached_report = None
+            st.session_state.cached_matched_jobs = None
+            st.session_state.cached_yoe = 0
+            st.session_state.cached_query = ""
+
+        is_new_cv = (st.session_state.last_cv_hash != cv_hash)
+
+        col_btn, _ = st.columns([1, 3])
+        with col_btn:
+            analyze_btn = st.button("🚀 Analyze CV & Match Jobs", type="primary")
+
+        # Run analysis when user clicks OR retrieve from cache if already analyzed
+        should_run_analysis = analyze_btn or (not is_new_cv and st.session_state.cached_report is not None)
+
+        if should_run_analysis:
             if not OPENAI_API_KEY:
                 st.error("⚠️ Missing OPENAI_API_KEY. Please check your .env file!")
                 st.stop()
 
-            with st.status("AI is processing...", expanded=True) as status:
-                try:
-                    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
-                    
-                    # STEP 1: READ PDF FILE
-                    status.update(label="1. Loading and parsing CV document...")
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                        tmp_file.write(uploaded_cv.getvalue())
-                        tmp_path = tmp_file.name
-                    
-                    loader = PyPDFLoader(tmp_path)
-                    cv_pages = loader.load_and_split()
-                    cv_text = " ".join([p.page_content for p in cv_pages])
-                    os.remove(tmp_path) 
-
-                    # STEP 1.5: QUERY TRANSFORMATION
-                    status.update(label="2. Analyzing practical experience & Standardizing query...")
-                    search_profile_prompt = f"""
-                    Read the following CV and perform 2 tasks:
-                    1. Count the total years of practical work experience (return an integer). Do not include university study time.
-                    2. Summarize the candidate's Job Role and core Tech Stack into a SINGLE, highly relevant English sentence (e.g., 'Senior Backend Developer skilled in Python, Django, AWS, and PostgreSQL').
-
-                    Return the result EXACTLY in the following format (Do not add any other text):
-                    YOE: [Number of years]
-                    QUERY: [English summary query]
-
-                    CV Text: {cv_text[:3000]}
-                    """
-                    
-                    profile_response = llm.invoke(search_profile_prompt).content
-                    
-                    candidate_yoe = 0
-                    search_query = cv_text 
-                    
+            # Only call OpenAI & RAG pipeline if it's a new CV or user explicitly clicked Analyze
+            if is_new_cv or (analyze_btn and st.session_state.cached_report is None):
+                with st.status("AI is processing your CV...", expanded=True) as status:
                     try:
-                        lines = profile_response.strip().split('\n')
-                        for line in lines:
-                            if line.startswith("YOE:"):
-                                candidate_yoe = int(re.findall(r'\d+', line)[0])
-                            elif line.startswith("QUERY:"):
-                                search_query = line.replace("QUERY:", "").strip()
-                    except Exception as e:
-                         st.warning("Error extracting YOE. Defaulting to 0 years.")
-                    
-                    st.write(f"*(AI estimated experience: **{candidate_yoe} years**)*")
-                    st.write(f"*(Optimized Search Query: **{search_query}**)*")
-
-                    # STEP 2: LOAD QDRANT VECTOR DATABASE (READ-ONLY)
-                    status.update(label="3. Accessing Qdrant Vector Database...")
-                    
-                    @st.cache_resource
-                    def get_qdrant_client():
-                        return QdrantClient(path=QDRANT_PATH)
-                    
-                    client = get_qdrant_client()
-                    
-                    if not client.collection_exists(collection_name=COLLECTION_NAME):
-                        status.update(label="Vector Database not found!", state="error")
-                        st.warning("⚠️ The AI system is currently synchronizing market data. Please check back in a few minutes!")
-                        st.stop()
-
-                    status.update(label="3. Loading Qdrant DB from local storage...")
-                    # Using the globally cached embeddings
-                    vectorstore = QdrantVectorStore(
-                        client=client, 
-                        collection_name=COLLECTION_NAME, 
-                        embedding=embeddings,
-                        sparse_embedding=sparse_embeddings, 
-                        retrieval_mode=RetrievalMode.HYBRID 
-                    )
-                    
-                    # ----------------------------------------------------
-                    # RERANKER
-                    # ----------------------------------------------------
-                    status.update(label="4. Deep Search & Reranking Top 10 matches...")
-                    qdrant_filter = Filter(
-                        must=[
-                            FieldCondition(
-                                key="metadata.yoe", 
-                                range=Range(lte=candidate_yoe + 1)
-                            )
-                        ]
-                    )
-                    
-                    # Get 10 Jobs by RRF
-                    base_retriever = vectorstore.as_retriever(
-                        search_kwargs={"k": 30, "filter": qdrant_filter} 
-                    )
-                    
-                    # Using the globally cached Reranker model
-                    compressor = CrossEncoderReranker(model=bge_reranker_model, top_n=10)
-                    
-                    compression_retriever = ContextualCompressionRetriever(
-                        base_compressor=compressor, 
-                        base_retriever=base_retriever
-                    )
-                    
-                    matched_jobs = compression_retriever.invoke(search_query)
-                    
-                    if not matched_jobs:
-                        st.warning(f"Unfortunately, no jobs found matching {candidate_yoe} years of experience.")
-                        st.stop()
+                        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
                         
-                    jobs_context = "\n\n".join([f"Job {i+1}: {doc.page_content}" for i, doc in enumerate(matched_jobs)])
+                        # STEP 1: READ PDF FILE
+                        status.update(label="1. Loading and parsing CV document...")
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                            tmp_file.write(cv_bytes)
+                            tmp_path = tmp_file.name
+                        
+                        loader = PyPDFLoader(tmp_path)
+                        cv_pages = loader.load_and_split()
+                        cv_text = " ".join([p.page_content for p in cv_pages])
+                        os.remove(tmp_path) 
 
-                    # STEP 4: GENERATE HR EVALUATION REPORT
-                    status.update(label="5. HR Expert is drafting the Gap Analysis...")
-                    llm_eval = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
-                    prompt = f"""
-                    You are a highly analytical and strict HR Director in the IT industry.
-                    Below is the candidate's CV and the Top 10 matching jobs (already pre-filtered by experience level).
-                    And makesure their are no duplicated job recommendations between the 10 jobs. If there are, remove the duplicates and only keep unique job recommendations.
+                        # STEP 1.5: QUERY TRANSFORMATION
+                        status.update(label="2. Analyzing practical experience & Standardizing query...")
+                        search_profile_prompt = f"""
+                        Read the following CV and perform 2 tasks:
+                        1. Count the total years of practical work experience (return an integer). Do not include university study time.
+                        2. Summarize the candidate's Job Role and core Tech Stack into a SINGLE, highly relevant English sentence (e.g., 'Senior Backend Developer skilled in Python, Django, AWS, and PostgreSQL').
 
-                    ### CANDIDATE'S ORIGINAL CV:
-                    {cv_text[:3500]} 
+                        Return the result EXACTLY in the following format (Do not add any other text):
+                        YOE: [Number of years]
+                        QUERY: [English summary query]
 
-                    ### TOP 10 MATCHING JOBS:
-                    {jobs_context}
+                        CV Text: {cv_text[:3000]}
+                        """
+                        
+                        profile_response = llm.invoke(search_profile_prompt).content
+                        
+                        candidate_yoe = 0
+                        search_query = cv_text 
+                        
+                        try:
+                            lines = profile_response.strip().split('\n')
+                            for line in lines:
+                                if line.startswith("YOE:"):
+                                    candidate_yoe = int(re.findall(r'\d+', line)[0])
+                                elif line.startswith("QUERY:"):
+                                    search_query = line.replace("QUERY:", "").strip()
+                        except Exception as e:
+                            st.warning("Error extracting YOE. Defaulting to 0 years.")
 
-                    ### EVALUATION TASKS (STRICTLY FOLLOW THIS ORDER):
-                    1. **Background Assessment (Education & Learning):** Briefly comment on the candidate's university, major, certificates, or self-learning path. Is this foundation solid for long-term growth?
-                    2. **Experience Assessment (Work History):** How many years of experience does the candidate have? Are the projects deep enough or superficial? Compared to the required experience of the 10 Jobs above, is the candidate underqualified?
-                    3. **Tech Stack Assessment (Tools & Frameworks):** Point out exactly which technical skills the candidate is strong at, and which required skills from the Jobs are missing (The Gap).
-                    4. **30-Day Strategy:** Provide the most practical advice for the candidate to bridge the Gap before applying to these 10 companies.
+                        # STEP 2: LOAD QDRANT VECTOR DATABASE (READ-ONLY)
+                        status.update(label="3. Accessing Qdrant Vector Database...")
+                        
+                        @st.cache_resource
+                        def get_qdrant_client():
+                            return QdrantClient(path=QDRANT_PATH)
+                        
+                        client = get_qdrant_client()
+                        
+                        if not client.collection_exists(collection_name=COLLECTION_NAME):
+                            status.update(label="Vector Database not found!", state="error")
+                            st.warning("⚠️ The AI system is currently synchronizing market data. Please check back in a few minutes!")
+                            st.stop()
 
-                    Respond in English, use clear Markdown formatting, and maintain a direct, professional, and uncompromising tone (do not flatter the candidate).
-                    """
-                    
-                    response = llm_eval.invoke(prompt)
-                    status.update(label="Analysis Complete!", state="complete")
-                    
-                    # RENDER RESULTS
-                    col1, col2 = st.columns([1, 2])
-                    with col1:
-                        st.info("📌 **Top 10 Best Matching Jobs:**")
-                        for job in matched_jobs:
-                            title = job.metadata.get("job_title", "View Job Details")
-                            url = job.metadata.get("job_url", "#")
-                            source = job.metadata.get("source", "Unknown")
+                        vectorstore = QdrantVectorStore(
+                            client=client, 
+                            collection_name=COLLECTION_NAME, 
+                            embedding=embeddings,
+                            sparse_embedding=sparse_embeddings, 
+                            retrieval_mode=RetrievalMode.HYBRID 
+                        )
+                        
+                        # ----------------------------------------------------
+                        # RERANKER (LAZY LOADED)
+                        # ----------------------------------------------------
+                        status.update(label="4. Deep Search & Reranking Top matches...")
+                        qdrant_filter = Filter(
+                            must=[
+                                FieldCondition(
+                                    key="metadata.yoe", 
+                                    range=Range(lte=candidate_yoe + 1)
+                                )
+                            ]
+                        )
+                        
+                        base_retriever = vectorstore.as_retriever(
+                            search_kwargs={"k": 30, "filter": qdrant_filter} 
+                        )
+                        
+                        # Lazy load heavy reranker model on demand
+                        bge_reranker_model = get_reranker_model()
+                        compressor = CrossEncoderReranker(model=bge_reranker_model, top_n=10)
+                        
+                        compression_retriever = ContextualCompressionRetriever(
+                            base_compressor=compressor, 
+                            base_retriever=base_retriever
+                        )
+                        
+                        matched_jobs = compression_retriever.invoke(search_query)
+                        
+                        if not matched_jobs:
+                            st.warning(f"Unfortunately, no jobs found matching {candidate_yoe} years of experience.")
+                            st.stop()
                             
-                            st.markdown(f"**[{title}]({url})** `[{source}]`")
-                            clean_content = job.page_content.replace(f"Source: {source} | Title: {title} | ", "")
-                            st.caption(clean_content)
-                            st.divider()
-                            
-                    with col2:
-                        st.markdown(response.content)
+                        # Deduplicate jobs by URL to prevent duplicate cards
+                        seen_urls = set()
+                        unique_matched_jobs = []
+                        for doc in matched_jobs:
+                            u = doc.metadata.get("job_url", "")
+                            if u not in seen_urls:
+                                seen_urls.add(u)
+                                unique_matched_jobs.append(doc)
 
-                except Exception as e:
-                    status.update(label="An error occurred!", state="error")
-                    st.error(f"System Error: {e}")
+                        jobs_context = "\n\n".join([f"Job {i+1}: {doc.page_content}" for i, doc in enumerate(unique_matched_jobs)])
+
+                        # STEP 4: GENERATE HR EVALUATION REPORT
+                        status.update(label="5. HR Expert is drafting the Gap Analysis...")
+                        llm_eval = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
+                        prompt = f"""
+                        You are a highly analytical and strict HR Director in the IT industry.
+                        Below is the candidate's CV and the Top matching jobs (already pre-filtered by experience level).
+                        Ensure there are no duplicated job recommendations.
+
+                        ### CANDIDATE'S ORIGINAL CV:
+                        {cv_text[:3500]} 
+
+                        ### TOP MATCHING JOBS:
+                        {jobs_context}
+
+                        ### EVALUATION TASKS (STRICTLY FOLLOW THIS ORDER):
+                        1. **Background Assessment (Education & Learning):** Briefly comment on the candidate's university, major, certificates, or self-learning path. Is this foundation solid for long-term growth?
+                        2. **Experience Assessment (Work History):** How many years of experience does the candidate have? Are the projects deep enough or superficial? Compared to the required experience of the Jobs above, is the candidate underqualified?
+                        3. **Tech Stack Assessment (Tools & Frameworks):** Point out exactly which technical skills the candidate is strong at, and which required skills from the Jobs are missing (The Gap).
+                        4. **30-Day Strategy:** Provide the most practical advice for the candidate to bridge the Gap before applying to these companies.
+
+                        Respond in English, use clear Markdown formatting, and maintain a direct, professional, and uncompromising tone (do not flatter the candidate).
+                        """
+                        
+                        response = llm_eval.invoke(prompt)
+                        status.update(label="Analysis Complete!", state="complete")
+
+                        # Save to session cache
+                        st.session_state.last_cv_hash = cv_hash
+                        st.session_state.cached_report = response.content
+                        st.session_state.cached_matched_jobs = unique_matched_jobs
+                        st.session_state.cached_yoe = candidate_yoe
+                        st.session_state.cached_query = search_query
+
+                    except Exception as e:
+                        status.update(label="An error occurred!", state="error")
+                        st.error(f"System Error: {e}")
+
+            # RENDER RESULTS FROM SESSION CACHE
+            if st.session_state.cached_report and st.session_state.cached_matched_jobs:
+                st.write(f"*(AI estimated experience: **{st.session_state.cached_yoe} years**)*")
+                st.write(f"*(Optimized Search Query: **{st.session_state.cached_query}**)*")
+
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.info("📌 **Top Best Matching Jobs:**")
+                    for job in st.session_state.cached_matched_jobs:
+                        title = job.metadata.get("job_title", "View Job Details")
+                        url = job.metadata.get("job_url", "#")
+                        source = job.metadata.get("source", "Unknown")
+                        
+                        st.markdown(f"**[{title}]({url})** `[{source}]`")
+                        clean_content = job.page_content.replace(f"Source: {source} | Title: {title} | ", "")
+                        st.caption(clean_content)
+                        st.divider()
+                        
+                with col2:
+                    st.markdown(st.session_state.cached_report)

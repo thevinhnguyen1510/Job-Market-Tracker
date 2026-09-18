@@ -1,73 +1,69 @@
-import duckdb
-from curl_cffi import requests
-from bs4 import BeautifulSoup
+import os
+import glob
 import time
 import random
-import os
+import pandas as pd
+from curl_cffi import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
 
-print("ACTIVATING PIPELINE 1.5: DEEP DIVE INTO JOB DESCRIPTIONS...")
+print("ACTIVATING PIPELINE 1.5: DEEP DIVE INTO JOB DESCRIPTIONS (PARQUET EDITION)...")
 
-# 1. Connect to database
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
-conn = duckdb.connect(db_path)
+landing_dir = os.path.join(BASE_DIR, "data", "landing", "itviec")
 
-pending_jobs = conn.execute("""
-    SELECT job_id, job_url 
-    FROM raw_itviec_jobs 
-    WHERE job_description IS NULL 
-       OR job_description = '' 
-       OR job_description = 'Connection error'
-""").fetchall()
+# 1. Tìm các file raw parquet vừa cào
+raw_files = sorted(glob.glob(os.path.join(landing_dir, "itviec_raw_*.parquet")))
 
-total_jobs = len(pending_jobs)
-if total_jobs == 0:
-    print("All jobs already have Job Description. No need to crawl.")
-    conn.close()
-    exit()
+if not raw_files:
+    print("No pending raw ITViec files in Landing Zone. Skipping enrichment.")
+    exit(0)
 
-print(f"Found {total_jobs} jobs needing description extraction.\n")
+# Lấy file raw mới nhất
+latest_file = raw_files[-1]
+print(f"Reading jobs from: {latest_file}")
+df = pd.read_parquet(latest_file)
+
+if df.empty:
+    print("File is empty. Exiting.")
+    exit(0)
 
 headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 }
 
-# 2. LOOP TO CRAWL DETAILS AND UPDATE DIRECTLY TO DATABASE
-for index, (job_id, job_url) in enumerate(pending_jobs):
+# 2. Cào Job Description
+enriched_descriptions = []
+total_jobs = len(df)
+
+for index, row in df.iterrows():
+    job_url = row['job_url']
     print(f"[{index + 1}/{total_jobs}] Extracting details for: {job_url.split('/')[-1][:40]}...")
     
     jd_text = ""
     try:
-        response = requests.get(job_url, headers=headers, impersonate="chrome110")
-        
+        response = requests.get(job_url, headers=headers, impersonate="chrome110", timeout=30)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             job_content = soup.find("section", class_=lambda x: x and "job-content" in x)
-            
-            if job_content:
-                jd_text = job_content.get_text(separator="\n", strip=True)
-            else:
-                jd_text = "JD content not found"
-                
+            jd_text = job_content.get_text(separator="\n", strip=True) if job_content else "JD content not found"
         else:
-            print(f"   -> Access error: {response.status_code}")
             jd_text = f"Error {response.status_code}"
-            
     except Exception as e:
-         print(f"   -> Network crash or error: {e}")
-         jd_text = "Connection error"
+        jd_text = "Connection error"
 
-    try:
-        conn.execute("""
-            UPDATE raw_itviec_jobs 
-            SET job_description = ? 
-            WHERE job_id = ?
-        """, (jd_text, job_id))
-    except Exception as e:
-        print(f"-> Error saving to Database: {e}")
+    enriched_descriptions.append(jd_text)
+    time.sleep(random.uniform(1.5, 3.0))
 
-    # ANTI-BAN SHIELD
-    time.sleep(random.uniform(1.5, 3.5)) 
+# 3. Cập nhật cột job_description vào DataFrame
+df['job_description'] = enriched_descriptions
 
-print("\nCompleted! All Job Descriptions have been safely loaded into the Bronze Layer.")
-conn.close()
+# 4. Lưu ra file enriched parquet
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+enriched_file = os.path.join(landing_dir, f"itviec_enriched_{timestamp}.parquet")
+df.to_parquet(enriched_file, index=False, compression="snappy")
+
+# Xóa file raw cũ sau khi đã enrich xong để tránh trùng
+os.remove(latest_file)
+
+print(f"\n[OK] Enriched data safely saved to: {enriched_file}")

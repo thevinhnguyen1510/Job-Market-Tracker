@@ -11,6 +11,7 @@ import os
 import time          
 import random
 import duckdb
+import pandas as pd
 from dotenv import load_dotenv
 
 print("Starting the hunt on TopCV with heavy weapons (SeleniumBase UC Mode)...")
@@ -21,7 +22,6 @@ load_dotenv()
 # Connect to Database
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
-conn = duckdb.connect(db_path)
 
 # Retrieve cookie and headers (if configured in .env)
 topcv_cookie = os.getenv('TOPCV_COOKIE', '')
@@ -249,27 +249,18 @@ try:
                 break
 
     # ==========================================
-    # 3. SAVE DATA TO DUCKDB
+    # 3. SAVE RAW DATA TO LANDING ZONE (PARQUET)
     # ==========================================
     if jobs_data:
-        print(f"\n[OK] Extraction complete! Preparing to insert {len(jobs_data)} new jobs into DuckDB...")
-        for job in jobs_data:
-            try:
-                conn.execute("""
-                    INSERT INTO raw_topcv_jobs (
-                        job_id, job_url, job_title, company_name, location, 
-                        salary_raw, tech_stack, source, crawl_timestamp, 
-                        experience_level, job_category, job_description
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (job_id) DO NOTHING
-                """, (
-                    job['job_id'], job['job_url'], job['job_title'], job['company_name'], job['location'],
-                    job['salary_raw'], job['tech_stack'], job['source'], job['crawl_timestamp'],
-                    job['experience_level'], job['job_category'], job['job_description']
-                ))
-            except Exception as e:
-                print(f"Error inserting job {job['job_id']}: {e}")
-        print("Data successfully loaded into the Bronze Layer (raw_topcv_jobs)!")
+        df = pd.DataFrame(jobs_data)
+        landing_dir = os.path.join(BASE_DIR, "data", "landing", "topcv")
+        os.makedirs(landing_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_path = os.path.join(landing_dir, f"topcv_raw_{timestamp}.parquet")
+        
+        df.to_parquet(file_path, index=False, compression="snappy")
+        print(f"\n[OK] Successfully saved {len(df)} TopCV jobs to {file_path}")
     else:
         print("\nNo new jobs to insert.")
 
@@ -280,5 +271,4 @@ finally:
     except: pass
     try: display.stop()
     except: pass
-    conn.close()
     print("Pipeline finished successfully.")

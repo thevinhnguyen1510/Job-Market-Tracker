@@ -4,7 +4,7 @@ from datetime import datetime
 import os
 import time          
 import random
-import duckdb
+import pandas as pd
 from dotenv import load_dotenv
 
 print("Starting the hunt on ITviec with heavy weapons...")
@@ -14,6 +14,7 @@ load_dotenv()
 
 # 2. Get Cookie from environment variables safely
 itviec_cookie = os.getenv('ITVIEC_COOKIE', '')
+
 
 if not itviec_cookie:
     print("Cannot find ITVIEC_COOKIE configuration in the .env file!")
@@ -159,58 +160,26 @@ for keyword in keywords:
             print(f"Reached 50 pages for {keyword.upper()}, applying emergency brake!")
             break
 
-# 3. LOAD DATA INTO BRONZE LAYER (DUCKDB) WITH DUPLICATE PREVENTION
+# ========================================================
+# 3. LƯU DỮ LIỆU THÔ VÀO LANDING ZONE (PARQUET)
+# ========================================================
 if jobs_data:
-    print("\nLoading data into Database (Bronze Layer)...")
-    
+    df = pd.DataFrame(jobs_data)
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
-    conn = duckdb.connect(db_path)
     
-    # Ensure table raw_itviec_jobs exists (with job_id as PRIMARY KEY)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS raw_itviec_jobs (
-            job_id VARCHAR PRIMARY KEY,
-            job_url VARCHAR,
-            job_title VARCHAR,
-            company_name VARCHAR,
-            location VARCHAR,
-            salary_raw VARCHAR,
-            tech_stack VARCHAR,
-            source VARCHAR,
-            crawl_timestamp TIMESTAMP,
-            experience_level VARCHAR,
-            job_category VARCHAR,
-            job_description VARCHAR
-        );
-    """)
+    # 1. Đường dẫn thư mục Landing
+    landing_dir = os.path.join(BASE_DIR, "data", "landing", "itviec")
+    os.makedirs(landing_dir, exist_ok=True)
     
-    new_jobs_count = 0
-    for job in jobs_data:
-        try:
-            conn.execute("""
-                INSERT INTO raw_itviec_jobs (
-                    job_id, job_url, job_title, company_name, location, salary_raw, 
-                    tech_stack, source, crawl_timestamp, experience_level, 
-                    job_category, job_description
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (job_id) DO NOTHING;
-            """, (
-                job['job_id'], job['job_url'], job['job_title'], job['company_name'], job['location'], 
-                job['salary_raw'], job['tech_stack'], job['source'], job['crawl_timestamp'], 
-                job['experience_level'], job['job_category'], job['job_description']
-            ))
-            new_jobs_count += 1 
-            
-        except Exception as e:
-            if "Constraint Error" not in str(e):
-                print(f"Error inserting job {job['job_title']}: {e}")
-            
-    total_raw = conn.execute("SELECT COUNT(*) FROM raw_itviec_jobs").fetchone()[0]
-    conn.close()
+    # 2. Đặt tên file có timestamp để phân biệt các batch cào
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_path = os.path.join(landing_dir, f"itviec_raw_{timestamp}.parquet")
     
-    print(f" MISSION ACCOMPLISHED!")
-    print(f"   - Number of jobs collected this time: {len(jobs_data)}")
-    print(f"   - Total number of jobs in Database (Bronze Layer): {total_raw}")
+    # 3. Ghi file Parquet (không phụ thuộc vào DuckDB, không lo lock file)
+    df.to_parquet(file_path, index=False, compression="snappy")
+    
+    print(f"\n[OK] MISSION ACCOMPLISHED!")
+    print(f"   - Số jobs cào được: {len(df)}")
+    print(f"   - Đã lưu an toàn vào Landing Zone: {file_path}")
 else:
     print("\nMission failed: No data collected.")

@@ -1,6 +1,6 @@
-from airflow import DAG
-from airflow.operators.bash import BashOperator
-from airflow.operators.empty import EmptyOperator
+from airflow import DAG # type: ignore
+from airflow.operators.bash import BashOperator # type: ignore
+from airflow.operators.empty import EmptyOperator # type: ignore
 from datetime import datetime, timedelta
 
 # ==========================================
@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 # ==========================================
 SCRIPTS_DIR = "/opt/airflow/scripts"
 DBT_DIR = "/opt/airflow/analytics_dbt"
-PYTHON_CMD = "python" 
+PYTHON_CMD = "python -u" 
 
 # ==========================================
 # 2. CONFIG AIRFLOW
@@ -53,6 +53,13 @@ with DAG(
     # Dummy operator acting as a checkpoint for the Raw Layer
     wait_for_raw_data = EmptyOperator(task_id='wait_for_raw_data')
 
+
+    ingest_landing = BashOperator(
+        task_id='ingest_landing_to_bronze',
+        bash_command=f'cd {SCRIPTS_DIR} && {PYTHON_CMD} ingest_landing_to_bronze.py'
+    )
+
+
     # ==========================================
     # PHASE 2.5: DBT STAGING & INTERMEDIATE 
     # ==========================================
@@ -86,6 +93,11 @@ with DAG(
         task_id='dbt_run_models_gold', 
         bash_command=f"cd {DBT_DIR} && dbt run --select gold"
     )
+
+    dbt_test = BashOperator(
+        task_id='dbt_test_data_quality',
+        bash_command=f"cd {DBT_DIR} && dbt test"
+    )
     
     sync_qdrant = BashOperator(
         task_id='sync_qdrant_vector_db', 
@@ -96,14 +108,17 @@ with DAG(
     # WORKFLOW / DEPENDENCIES DEFINITION
     # ==========================================
     
-    # 1. RAW LAYER: Strictly sequential to prevent DuckDB concurrency write locks
-    crawl_itviec >> enrich_itviec >> crawl_topcv >> enrich_topcv >> wait_for_raw_data
+    #ITViec
+    crawl_itviec >> enrich_itviec
 
-    # 2. DBT INTEGRATION: Runs only after all raw data is safely landed
-    wait_for_raw_data >> dbt_build_int
+    #TopCV
+    crawl_topcv >> enrich_topcv
+
+    #Ingestion
+    [enrich_itviec, enrich_topcv] >> ingest_landing >> dbt_build_int
 
     # 3. SILVER LAYER: Sequential extraction to avoid database locking
     dbt_build_int >> ai_extract_itviec >> ai_extract_topcv >> cleanup_expired
 
     # 4. DOWNSTREAM LAYER: Finalize metrics and update vector search engine
-    cleanup_expired >> update_metrics >> sync_qdrant
+    cleanup_expired >> update_metrics >> dbt_test >>  sync_qdrant

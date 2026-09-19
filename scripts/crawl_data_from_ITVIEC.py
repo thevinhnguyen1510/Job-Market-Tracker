@@ -77,7 +77,7 @@ for keyword in keywords:
                     title_element = card.find("h3") 
                     job_title = title_element.text.strip()
                     
-                    # ITviec lấy link từ data-url
+                    # ITViec extracts link from data-url attribute
                     raw_url = title_element.get('data-url', '') 
                     if raw_url and not raw_url.startswith('http'):
                         raw_url = "https://itviec.com" + raw_url
@@ -142,7 +142,7 @@ for keyword in keywords:
 
             print(f"Captured {new_jobs_on_page} REAL jobs on page {page}.")
             if new_jobs_on_page == 0:
-                print(f"[!] All the jobs on page {page} are duplicates. Breaking the loop for {keyword.upper()}!")
+                print(f"[!] All jobs on page {page} are duplicates. Breaking loop for {keyword.upper()}!")
                 break
 
         else:
@@ -157,29 +157,29 @@ for keyword in keywords:
         page += 1
         
         if page > 50: 
-            print(f"Reached 50 pages for {keyword.upper()}, applying emergency brake!")
+            print(f"Reached 50 pages for {keyword.upper()}, applying safety limit!")
             break
 
 # ========================================================
-# 3. LƯU DỮ LIỆU THÔ VÀO LANDING ZONE (PARQUET)
+# 3. SAVE RAW DATA TO LANDING ZONE (PARQUET)
 # ========================================================
 if jobs_data:
     df = pd.DataFrame(jobs_data)
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
-    # 1. Đường dẫn thư mục Landing
+    # 1. Landing directory path
     landing_dir = os.path.join(BASE_DIR, "data", "landing", "itviec")
     os.makedirs(landing_dir, exist_ok=True)
     
-    # 2. Đặt tên file có timestamp để phân biệt các batch cào
+    # 2. Timestamped filename to distinguish ingestion batches
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     file_path = os.path.join(landing_dir, f"itviec_raw_{timestamp}.parquet")
     
-    # 3. Ghi file Parquet (không phụ thuộc vào DuckDB, không lo lock file)
+    # 3. Write Parquet file (decoupled from DuckDB to prevent file locking)
     df.to_parquet(file_path, index=False, compression="snappy")
     
     print(f"\n[OK] MISSION ACCOMPLISHED!")
-    print(f"   - Số jobs cào được: {len(df)}")
-    print(f"   - Đã lưu an toàn vào Landing Zone: {file_path}")
+    print(f"   - Scraped jobs: {len(df)}")
+    print(f"   - Safely saved to Landing Zone: {file_path}")
 else:
     print("\nMission failed: No data collected.")

@@ -383,9 +383,28 @@ with tab2:
                         )
                         
                         matched_jobs = compression_retriever.invoke(search_query)
+
+                        # Filter out any inactive or expired jobs directly against DuckDB
+                        try:
+                            BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+                            db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
+                            if os.path.exists(db_path):
+                                check_conn = duckdb.connect(db_path, read_only=True)
+                                job_ids = [doc.metadata.get("job_id") for doc in matched_jobs if doc.metadata.get("job_id")]
+                                if job_ids:
+                                    placeholders = ", ".join(["?"] * len(job_ids))
+                                    active_rows = check_conn.execute(
+                                        f"SELECT job_id FROM silver_all_jobs WHERE job_id IN ({placeholders}) AND status = 'Active'",
+                                        job_ids
+                                    ).fetchall()
+                                    active_ids = {r[0] for r in active_rows}
+                                    matched_jobs = [doc for doc in matched_jobs if doc.metadata.get("job_id") in active_ids]
+                                check_conn.close()
+                        except Exception:
+                            pass
                         
                         if not matched_jobs:
-                            st.warning(f"Unfortunately, no jobs found matching {candidate_yoe} years of experience.")
+                            st.warning(f"Unfortunately, no active jobs found matching {candidate_yoe} years of experience.")
                             st.stop()
                             
                         # Deduplicate jobs by URL to prevent duplicate cards

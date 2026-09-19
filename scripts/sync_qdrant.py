@@ -13,6 +13,8 @@ from langchain_openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 
+import sys
+
 # 1. SETUP CONFIGURATION
 load_dotenv()
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,10 +23,17 @@ COLLECTION_NAME = "all_it_jobs_v6"
 
 print("INITIATING QDRANT VECTOR DB AUTO-SYNC...")
 
+try:
+    client = QdrantClient(path=QDRANT_PATH)
+except Exception as e:
+    if "already accessed by another instance" in str(e).lower() or "locked" in str(e).lower():
+        print("\n[!] LOCK CONFLICT: The local Qdrant database is currently locked by another process (e.g., Streamlit).")
+        print("    -> Please temporarily stop Streamlit (Ctrl+C in its terminal), re-run this script, then restart Streamlit.\n")
+        sys.exit(1)
+    raise e
+
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
-
-client = QdrantClient(path=QDRANT_PATH)
 
 # ========================================================
 # AUTO-INITIALIZE HYBRID VECTOR SPACE IF NOT EXISTS
@@ -55,20 +64,22 @@ db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 conn = duckdb.connect(db_path, read_only=True)
 
 # ========================================================
-# TASK A: CLEANUP INACTIVE JOBS (Skip on first run)
+# TASK A: CLEANUP INACTIVE / EXPIRED JOBS (Skip on first run)
 # ========================================================
 if not is_first_run:
     inactive_jobs_df = conn.execute("""
         SELECT job_id FROM silver_all_jobs
-        WHERE status = 'Inactive' 
-          AND last_seen_at >= CURRENT_DATE - INTERVAL 2 DAY
+        WHERE status != 'Active' OR status IS NULL
     """).df()
 
     if not inactive_jobs_df.empty:
-        print(f"Found {len(inactive_jobs_df)} expired jobs. Deleting from Qdrant...")
+        print(f"Found {len(inactive_jobs_df)} inactive/expired jobs in DB. Ensuring removed from Qdrant...")
         delete_ids = [str(uuid.UUID(hashlib.md5(str(j_id).encode()).hexdigest())) for j_id in inactive_jobs_df['job_id']]
-        client.delete(collection_name=COLLECTION_NAME, points_selector=delete_ids)
-        print("   [OK] Cleanup completed!")
+        BATCH_SIZE = 500
+        for i in range(0, len(delete_ids), BATCH_SIZE):
+            batch = delete_ids[i:i + BATCH_SIZE]
+            client.delete(collection_name=COLLECTION_NAME, points_selector=batch)
+        print("   [OK] Inactive cleanup from Qdrant completed!")
 
 # ========================================================
 # TASK B: DATA UPSERT (Auto-detect Full vs Incremental Load)
@@ -100,7 +111,8 @@ else:
                 "job_title": row['job_title'], 
                 "job_url": row['job_url'], 
                 "yoe": row['min_years_of_experience'],
-                "source": row['source']
+                "source": row['source'],
+                "status": row['status']
             }
         ))
         
@@ -112,4 +124,5 @@ else:
     print(f"   [OK] Successfully synced {len(jobs_df)} Vectors into the Hybrid space!")
 
 conn.close()
+client.close()
 print("\nVECTOR DB SYNC COMPLETED.")

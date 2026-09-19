@@ -1,11 +1,14 @@
+import pendulum
 from airflow import DAG # type: ignore
 from airflow.operators.bash import BashOperator # type: ignore
 from airflow.operators.empty import EmptyOperator # type: ignore
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 # ==========================================
-# 1. SETUP DIRECTORY & ENVIRONMENT
+# 1. SETUP TIMEZONE & DIRECTORY
 # ==========================================
+local_tz = pendulum.timezone("Asia/Ho_Chi_Minh")
+
 SCRIPTS_DIR = "/opt/airflow/scripts"
 DBT_DIR = "/opt/airflow/analytics_dbt"
 PYTHON_CMD = "python -u" 
@@ -16,7 +19,7 @@ PYTHON_CMD = "python -u"
 default_args = {
     'owner': 'DataEngineer',
     'depends_on_past': False,
-    'start_date': datetime(2026, 4, 11),
+    'start_date': pendulum.datetime(2024, 1, 1, tz=local_tz),
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
 }
@@ -25,7 +28,7 @@ with DAG(
     'it_job_market_etl_pipeline',
     default_args=default_args,
     description='End-to-end Job Market Pipeline',
-    schedule=None,
+    schedule='0 7 * * *', 
     catchup=False
 ) as dag:
 
@@ -108,17 +111,15 @@ with DAG(
     # WORKFLOW / DEPENDENCIES DEFINITION
     # ==========================================
     
-    #ITViec
+    # 1. RAW CRAWL & ENRICH BRANCHES
     crawl_itviec >> enrich_itviec
-
-    #TopCV
     crawl_topcv >> enrich_topcv
 
-    #Ingestion
-    [enrich_itviec, enrich_topcv] >> ingest_landing >> dbt_build_int
+    # 2. BRONZE INGESTION & STAGING
+    [enrich_itviec, enrich_topcv] >> wait_for_raw_data >> ingest_landing >> dbt_build_int
 
-    # 3. SILVER LAYER: Sequential extraction to avoid database locking
+    # 3. SILVER LAYER: Sequential extraction to prevent DuckDB write contention
     dbt_build_int >> ai_extract_itviec >> ai_extract_topcv >> cleanup_expired
 
-    # 4. DOWNSTREAM LAYER: Finalize metrics and update vector search engine
-    cleanup_expired >> update_metrics >> dbt_test >>  sync_qdrant
+    # 4. GOLD LAYER & VECTOR SYNC: Finalize market marts and update vector embeddings
+    cleanup_expired >> update_metrics >> dbt_test >> sync_qdrant

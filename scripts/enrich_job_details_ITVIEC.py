@@ -12,14 +12,14 @@ print("ACTIVATING PIPELINE 1.5: DEEP DIVE INTO JOB DESCRIPTIONS (PARQUET EDITION
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 landing_dir = os.path.join(BASE_DIR, "data", "landing", "itviec")
 
-# 1. Tìm các file raw parquet vừa cào
+# 1. Locate raw parquet files in Landing Zone
 raw_files = sorted(glob.glob(os.path.join(landing_dir, "itviec_raw_*.parquet")))
 
 if not raw_files:
     print("No pending raw ITViec files in Landing Zone. Skipping enrichment.")
     exit(0)
 
-# Lấy file raw mới nhất
+# Retrieve the latest raw batch
 latest_file = raw_files[-1]
 print(f"Reading jobs from: {latest_file}")
 df = pd.read_parquet(latest_file)
@@ -32,7 +32,7 @@ headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 }
 
-# 2. Cào Job Description
+# 2. Extract Job Descriptions and verify job status
 enriched_descriptions = []
 total_jobs = len(df)
 
@@ -44,9 +44,26 @@ for index, row in df.iterrows():
     try:
         response = requests.get(job_url, headers=headers, impersonate="chrome110", timeout=30)
         if response.status_code == 200:
-            soup = BeautifulSoup(response.text, "html.parser")
-            job_content = soup.find("section", class_=lambda x: x and "job-content" in x)
-            jd_text = job_content.get_text(separator="\n", strip=True) if job_content else "JD content not found"
+            html_text = response.text
+            soup = BeautifulSoup(html_text, "html.parser")
+            
+            # Check for live expired badges on ITViec via DOM inspection
+            # Target: .job-actions container with .bg-light-warning-color and text 'Expired'
+            job_actions = soup.find("div", class_="job-actions")
+            is_expired = False
+            if job_actions:
+                if soup.select_one(".job-actions .bg-light-warning-color") or "expired" in job_actions.get_text().lower():
+                    is_expired = True
+
+            if is_expired:
+                print("   -> [!] Job is EXPIRED on ITViec (Badge '.job-actions Expired'). Marking as EXPIRED.")
+                jd_text = "EXPIRED"
+            else:
+                job_content = soup.find("section", class_=lambda x: x and "job-content" in x)
+                jd_text = job_content.get_text(separator="\n", strip=True) if job_content else "JD content not found"
+        elif response.status_code in [404, 410]:
+            print(f"   -> [!] Job not found ({response.status_code}). Marking as EXPIRED.")
+            jd_text = "EXPIRED"
         else:
             jd_text = f"Error {response.status_code}"
     except Exception as e:
@@ -55,15 +72,15 @@ for index, row in df.iterrows():
     enriched_descriptions.append(jd_text)
     time.sleep(random.uniform(1.5, 3.0))
 
-# 3. Cập nhật cột job_description vào DataFrame
+# 3. Update job_description column in DataFrame
 df['job_description'] = enriched_descriptions
 
-# 4. Lưu ra file enriched parquet
+# 4. Save enriched batch to Landing Zone (Parquet)
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 enriched_file = os.path.join(landing_dir, f"itviec_enriched_{timestamp}.parquet")
 df.to_parquet(enriched_file, index=False, compression="snappy")
 
-# Xóa file raw cũ sau khi đã enrich xong để tránh trùng
+# Remove raw file after successful enrichment to avoid duplicate ingestion
 os.remove(latest_file)
 
 print(f"\n[OK] Enriched data safely saved to: {enriched_file}")

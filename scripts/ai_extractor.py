@@ -36,7 +36,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("ERROR: OPENAI_API_KEY not found in .env file!")
 
-# Khởi tạo Async client với cơ chế tương thích mọi phiên bản của instructor
+# Initialize Async client with backward/forward compatibility for instructor versions
 raw_async_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 try:
@@ -51,7 +51,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 
 # ==========================================
-# 2. TẠO BẢNG SILVER & LẤY PENDING JOBS (ĐÓNG DB NGAY)
+# 2. CREATE SILVER TABLE & FETCH PENDING JOBS (RELEASE LOCK IMMEDIATELY)
 # ==========================================
 conn = duckdb.connect(db_path)
 try:
@@ -72,17 +72,31 @@ try:
         );
     """)
 
-    # Bulk update last_seen_at cho các job đang quét thấy
+    # 1. Mark jobs as Inactive if flagged as EXPIRED in intermediate staging
+    conn.execute(f"""
+        UPDATE {SILVER_TABLE}
+        SET status = 'Inactive',
+            last_seen_at = CURRENT_TIMESTAMP
+        WHERE job_id IN (
+            SELECT job_id FROM {INT_TABLE} 
+            WHERE source = '{SOURCE_FILTER}' AND job_description = 'EXPIRED'
+        )
+    """)
+
+    # 2. Update last_seen_at and Active status for jobs CRAWLED TODAY
     conn.execute(f"""
         UPDATE {SILVER_TABLE}
         SET last_seen_at = CURRENT_TIMESTAMP, 
             status = 'Active'
         WHERE job_id IN (
-            SELECT job_id FROM {INT_TABLE} WHERE source = '{SOURCE_FILTER}'
+            SELECT job_id FROM {INT_TABLE} 
+            WHERE source = '{SOURCE_FILTER}' 
+              AND DATE(crawl_timestamp) = CURRENT_DATE
+              AND (job_description IS NULL OR job_description != 'EXPIRED')
         )
     """)
 
-    # Lấy danh sách job cần extract
+    # 3. Retrieve jobs needing AI extraction (skip EXPIRED, connection errors, or empty)
     pending_jobs = conn.execute(f"""
         SELECT DISTINCT r.job_id, r.job_url, r.job_title, r.job_description 
         FROM {INT_TABLE} r
@@ -92,10 +106,11 @@ try:
           AND r.job_description IS NOT NULL
           AND r.job_description != 'JD content not found'
           AND r.job_description != 'Connection error'
+          AND r.job_description != 'EXPIRED'
     """).fetchall()
 
 finally:
-    # ĐÓNG DB NGAY ĐỂ GIẢI PHÓNG TOÀN BỘ LOCK!
+    # CLOSE DB CONNECTION IMMEDIATELY TO RELEASE DUCKDB FILE LOCK!
     conn.close()
 
 total_pending = len(pending_jobs)
@@ -150,16 +165,16 @@ class JobExtraction(BaseModel):
         return self
 
 # ==========================================
-# 4. ASYNC EXTRACTION WORKER VỚI SEMAPHORE
+# 4. ASYNC EXTRACTION WORKER WITH SEMAPHORE
 # ==========================================
-# Tối đa 6 request đồng thời (vừa nhanh vừa không lo rate limit)
+# Cap at 6 concurrent requests (fast throughput while staying safely below rate limits)
 CONCURRENCY_LIMIT = 6
 semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
 async def extract_single_job(index: int, total: int, job: Tuple) -> Tuple:
     job_id, job_url, job_title, job_desc = job
     
-    # Rút gọn JD xuống 2200 ký tự
+    # Trim JD to 2200 characters to optimize token consumption
     trimmed_desc = job_desc[:2200]
     
     async with semaphore:
@@ -210,7 +225,7 @@ async def main():
     results = await asyncio.gather(*tasks)
     
     # ==========================================
-    # 5. BULK INSERT VÀO DUCKDB (CHỈ MẤT 0.1s)
+    # 5. BULK INSERT INTO DUCKDB
     # ==========================================
     print(f"\nBulk inserting {len(results)} extracted records into {SILVER_TABLE}...")
     db_conn = duckdb.connect(db_path)

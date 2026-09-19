@@ -35,7 +35,7 @@ try:
         source_archive_dir = os.path.join(archive_base, source)
         os.makedirs(source_archive_dir, exist_ok=True)
 
-        # Tìm các file đã enrich sẵn sàng nạp
+        # Locate enriched Parquet files ready for ingestion
         pattern = os.path.join(source_landing_dir, f"{source}_enriched_*.parquet")
         matching_files = glob.glob(pattern)
 
@@ -45,10 +45,10 @@ try:
 
         print(f"-> Ingesting {len(matching_files)} file(s) into {table_name}...")
         
-        # Đường dẫn dạng POSIX cho DuckDB đọc
+        # Format POSIX path for DuckDB Parquet reader
         posix_pattern = pattern.replace("\\", "/")
 
-        # Bulk upsert siêu tốc từ Parquet
+        # High-performance bulk upsert from Parquet files
         conn.execute(f"""
             INSERT INTO {table_name} (
                 job_id, job_url, job_title, company_name, location,
@@ -69,7 +69,7 @@ try:
                 END;
         """)
 
-        # Di chuyển các file đã nạp xong sang archive để lưu vết
+        # Move ingested files to archive for audit trail and landing cleanliness
         for f in matching_files:
             shutil.move(f, os.path.join(source_archive_dir, os.path.basename(f)))
             

@@ -305,108 +305,163 @@ with tab2:
                         cv_text = " ".join([p.page_content for p in cv_pages])
                         os.remove(tmp_path) 
 
-                        # STEP 1.5: QUERY TRANSFORMATION
-                        status.update(label="2. Analyzing practical experience & Standardizing query...")
+                        # STEP 1.5: STRUCTURED PROFILE EXTRACTION (ROLE + TECH STACK + YOE)
+                        status.update(label="2. Analyzing candidate profile & Tech Stack...")
+                        import json
+
                         search_profile_prompt = f"""
-                        Read the following CV and perform 2 tasks:
-                        1. Count the total years of practical work experience (return an integer). Do not include university study time.
-                        2. Summarize the candidate's Job Role and core Tech Stack into a SINGLE, highly relevant English sentence (e.g., 'Senior Backend Developer skilled in Python, Django, AWS, and PostgreSQL').
+                        You are an expert IT Technical Recruiter.
+                        Analyze the following CV and extract the candidate's core profile.
+                        Return a STRICT JSON object (no markdown, no backticks, only valid raw JSON):
+                        {{
+                            "yoe": <integer, practical years of work experience excluding university/internship study>,
+                            "target_role": "<primary job role, choose closest from: 'Backend', 'Frontend', 'Fullstack', 'Mobile', 'Data Engineer', 'Data Scientist', 'Data/Business Analyst', 'AI/Machine Learning', 'DevOps/Cloud', 'QA/QC/Tester'>",
+                            "primary_languages": [<list of 1-3 primary programming languages/technologies the candidate specializes in, e.g. ["C#", ".NET"] or ["Java"] or ["Python"] or ["JavaScript/TypeScript"]>],
+                            "core_skills": [<list of main frameworks/tools/databases, e.g. ["ASP.NET Core", "SQL Server", "Entity Framework", "Redis", "RESTful API"]>],
+                            "search_summary": "<A 1-sentence dense summary strictly focusing on role and tech stack, e.g. 'Junior Backend Developer specializing in C#, .NET, ASP.NET Core, SQL Server, Redis, RESTful API'>"
+                        }}
 
-                        Return the result EXACTLY in the following format (Do not add any other text):
-                        YOE: [Number of years]
-                        QUERY: [English summary query]
-
-                        CV Text: {cv_text[:3000]}
+                        CV Text:
+                        {cv_text[:6000]}
                         """
-                        
-                        profile_response = llm.invoke(search_profile_prompt).content
-                        
-                        candidate_yoe = 0
-                        search_query = cv_text 
-                        
+
+                        candidate_profile = {
+                            "yoe": 0,
+                            "target_role": "Unknown",
+                            "primary_languages": [],
+                            "core_skills": [],
+                            "search_summary": cv_text[:500]
+                        }
+
                         try:
-                            lines = profile_response.strip().split('\n')
-                            for line in lines:
-                                if line.startswith("YOE:"):
-                                    candidate_yoe = int(re.findall(r'\d+', line)[0])
-                                elif line.startswith("QUERY:"):
-                                    search_query = line.replace("QUERY:", "").strip()
-                        except Exception as e:
-                            st.warning("Error extracting YOE. Defaulting to 0 years.")
-
-                        # STEP 2: LOAD QDRANT VECTOR DATABASE (READ-ONLY)
-                        status.update(label="3. Accessing Qdrant Vector Database...")
-                        
-                        @st.cache_resource
-                        def get_qdrant_client():
-                            return QdrantClient(path=QDRANT_PATH)
-                        
-                        client = get_qdrant_client()
-                        
-                        if not client.collection_exists(collection_name=COLLECTION_NAME):
-                            status.update(label="Vector Database not found!", state="error")
-                            st.warning("⚠️ The AI system is currently synchronizing market data. Please check back in a few minutes!")
-                            st.stop()
-
-                        vectorstore = QdrantVectorStore(
-                            client=client, 
-                            collection_name=COLLECTION_NAME, 
-                            embedding=embeddings,
-                            sparse_embedding=sparse_embeddings, 
-                            retrieval_mode=RetrievalMode.HYBRID 
-                        )
-                        
-                        # ----------------------------------------------------
-                        # RERANKER (LAZY LOADED)
-                        # ----------------------------------------------------
-                        status.update(label="4. Deep Search & Reranking Top matches...")
-                        qdrant_filter = Filter(
-                            must=[
-                                FieldCondition(
-                                    key="metadata.yoe", 
-                                    range=Range(lte=candidate_yoe + 1)
-                                )
-                            ]
-                        )
-                        
-                        base_retriever = vectorstore.as_retriever(
-                            search_kwargs={"k": 30, "filter": qdrant_filter} 
-                        )
-                        
-                        # Lazy load heavy reranker model on demand
-                        bge_reranker_model = get_reranker_model()
-                        compressor = CrossEncoderReranker(model=bge_reranker_model, top_n=10)
-                        
-                        compression_retriever = ContextualCompressionRetriever(
-                            base_compressor=compressor, 
-                            base_retriever=base_retriever
-                        )
-                        
-                        matched_jobs = compression_retriever.invoke(search_query)
-
-                        # Filter out any inactive or expired jobs directly against DuckDB
-                        try:
-                            BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-                            db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
-                            if os.path.exists(db_path):
-                                check_conn = duckdb.connect(db_path, read_only=True)
-                                job_ids = [doc.metadata.get("job_id") for doc in matched_jobs if doc.metadata.get("job_id")]
-                                if job_ids:
-                                    placeholders = ", ".join(["?"] * len(job_ids))
-                                    active_rows = check_conn.execute(
-                                        f"SELECT job_id FROM silver_all_jobs WHERE job_id IN ({placeholders}) AND status = 'Active'",
-                                        job_ids
-                                    ).fetchall()
-                                    active_ids = {r[0] for r in active_rows}
-                                    matched_jobs = [doc for doc in matched_jobs if doc.metadata.get("job_id") in active_ids]
-                                check_conn.close()
+                            profile_response = llm.invoke(search_profile_prompt).content
+                            clean_json = re.sub(r'^```json\s*|\s*```$', '', profile_response.strip(), flags=re.MULTILINE).strip()
+                            parsed = json.loads(clean_json)
+                            candidate_profile.update(parsed)
                         except Exception:
                             pass
-                        
-                        if not matched_jobs:
-                            st.warning(f"Unfortunately, no active jobs found matching {candidate_yoe} years of experience.")
+
+                        candidate_yoe = int(candidate_profile.get("yoe", 0))
+                        target_role = candidate_profile.get("target_role", "Backend")
+                        primary_langs = [p.strip() for p in candidate_profile.get("primary_languages", []) if p.strip()]
+                        core_skills = [c.strip() for c in candidate_profile.get("core_skills", []) if c.strip()]
+                        search_query = candidate_profile.get("search_summary", cv_text[:500])
+
+                        # STEP 2: MULTI-STAGE RETRIEVAL & SMART GATEKEEPER
+                        status.update(label="3. Filtering jobs by Target Role & Primary Tech Stack...")
+
+                        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+                        db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
+
+                        conn_match = duckdb.connect(db_path, read_only=True)
+                        all_active_df = conn_match.execute("""
+                            SELECT job_id, job_url, job_title, ai_job_role, ai_core_tech_stack, min_years_of_experience, job_level, source, english_requirement
+                            FROM silver_all_jobs
+                            WHERE status = 'Active'
+                        """).df()
+                        conn_match.close()
+
+                        # Incompatible roles to prevent cross-domain mismatch (e.g. Backend vs Data Analyst)
+                        incompatible_roles = {
+                            "Backend": ["Data/Business Analyst", "Data Scientist", "UI/UX Designer", "Product Owner/Manager", "QA/QC/Tester"],
+                            "Frontend": ["Data/Business Analyst", "Data Scientist", "AI/Machine Learning", "DevOps/Cloud"],
+                            "Fullstack": ["Data/Business Analyst", "Data Scientist", "UI/UX Designer", "Product Owner/Manager"],
+                            "Data Engineer": ["Frontend", "UI/UX Designer", "Mobile"],
+                            "Data/Business Analyst": ["Mobile", "Frontend", "DevOps/Cloud"],
+                            "AI/Machine Learning": ["Frontend", "UI/UX Designer", "Mobile"],
+                            "DevOps/Cloud": ["Frontend", "UI/UX Designer", "Data/Business Analyst"],
+                            "Mobile": ["Data/Business Analyst", "Data Scientist", "AI/Machine Learning", "DevOps/Cloud"],
+                            "QA/QC/Tester": ["Data Scientist", "AI/Machine Learning"]
+                        }
+
+                        banned_roles = incompatible_roles.get(target_role, [])
+                        primary_langs_lower = [p.lower() for p in primary_langs]
+                        core_skills_lower = [c.lower() for c in core_skills]
+
+                        candidates_pool = []
+
+                        for _, row in all_active_df.iterrows():
+                            role = str(row['ai_job_role'])
+                            title = str(row['job_title'])
+                            tech_str = str(row['ai_core_tech_stack']).lower()
+                            yoe = row['min_years_of_experience']
+
+                            # 1. GATEKEEPER: Chặn triệt để khác Role
+                            if role in banned_roles:
+                                continue
+
+                            # 2. TECH STACK MATCHING:
+                            matched_primary = any(p in tech_str or p in title.lower() for p in primary_langs_lower)
+
+                            score = 0
+                            if matched_primary:
+                                score += 150 # Ưu tiên tuyệt đối job đúng tech stack chính
+                            else:
+                                # Nếu ứng viên có stack chính rõ ràng (như C#/.NET), không nhồi job Java/Python/Golang vào
+                                competing_major_langs = ["java", "spring boot", "python", "golang", "go", "php", "ruby", "rust"]
+                                has_competing_only = any(lang in tech_str or lang in title.lower() for lang in competing_major_langs)
+                                if has_competing_only and primary_langs_lower:
+                                    continue
+                                score += 10
+
+                            # Match kỹ năng phụ / công cụ / DB
+                            matched_skills_count = sum(1 for s in core_skills_lower if s in tech_str or s in title.lower())
+                            score += matched_skills_count * 10
+
+                            # Thưởng điểm cho Role
+                            if target_role.lower() in role.lower() or target_role.lower() in title.lower():
+                                score += 30
+                            elif "developer" in title.lower() or "engineer" in title.lower() or "software" in title.lower():
+                                score += 10
+
+                            # YOE Soft Scoring (Không loại cứng, ưu tiên cấp bậc hợp lý)
+                            if yoe is not None:
+                                diff = yoe - candidate_yoe
+                                if diff <= 0:
+                                    score += 30 # Entry / Junior
+                                elif diff <= 2:
+                                    score += 20 # 1-2 năm chênh lệch (vừa sức ứng tuyển)
+                                elif diff <= 4:
+                                    score += 5  # Middle / Senior
+                                else:
+                                    score -= 30 # Yêu cầu quá cao
+                            else:
+                                score += 15
+
+                            doc = Document(
+                                page_content=f"Source: {row['source']} | Title: {row['job_title']} | Tech: {row['ai_core_tech_stack']} | Level: {row['job_level']} | Exp: {row['min_years_of_experience']} years | English: {row['english_requirement']}",
+                                metadata={
+                                    "job_id": row['job_id'],
+                                    "job_title": row['job_title'],
+                                    "job_url": row['job_url'],
+                                    "yoe": row['min_years_of_experience'],
+                                    "source": row['source'],
+                                    "status": "Active",
+                                    "score": score
+                                }
+                            )
+                            candidates_pool.append((score, doc))
+
+                        candidates_pool.sort(key=lambda x: x[0], reverse=True)
+                        top_candidates = [doc for score, doc in candidates_pool[:20]]
+
+                        if not top_candidates:
+                            st.warning(f"⚠️ Hiện tại chưa tìm thấy công việc **{target_role}** phù hợp với Tech Stack (**{', '.join(primary_langs)}**) trong cơ sở dữ liệu hiện tại.")
+                            st.info("💡 **Gợi ý:** Cơ sở dữ liệu hiện tại tập trung nhiều vào Data Engineer, Data Analyst, AI/ML. Bạn có thể mở rộng danh sách từ khóa cào dữ liệu cho pipeline để thu thập thêm các job Backend / .NET!")
                             st.stop()
-                            
+
+                        # STEP 3: RERANKER (DEEP RE-RANKING ON FILTERED CANDIDATES)
+                        status.update(label="4. Deep Search & Reranking Top matches...")
+                        bge_reranker_model = get_reranker_model()
+                        compressor = CrossEncoderReranker(model=bge_reranker_model, top_n=6)
+                        try:
+                            matched_jobs = compressor.compress_documents(top_candidates, search_query)
+                        except Exception:
+                            matched_jobs = top_candidates[:6]
+
+                        if not matched_jobs:
+                            matched_jobs = top_candidates[:6]
+
                         # Deduplicate jobs by URL to prevent duplicate cards
                         seen_urls = set()
                         unique_matched_jobs = []
@@ -427,7 +482,7 @@ with tab2:
                         Ensure there are no duplicated job recommendations.
 
                         ### CANDIDATE'S ORIGINAL CV:
-                        {cv_text[:3500]} 
+                        {cv_text} 
 
                         ### TOP MATCHING JOBS:
                         {jobs_context}
@@ -450,6 +505,8 @@ with tab2:
                         st.session_state.cached_matched_jobs = unique_matched_jobs
                         st.session_state.cached_yoe = candidate_yoe
                         st.session_state.cached_query = search_query
+                        st.session_state.cached_role = target_role
+                        st.session_state.cached_langs = primary_langs
 
                     except Exception as e:
                         status.update(label="An error occurred!", state="error")
@@ -457,8 +514,11 @@ with tab2:
 
             # RENDER RESULTS FROM SESSION CACHE
             if st.session_state.cached_report and st.session_state.cached_matched_jobs:
-                st.write(f"*(AI estimated experience: **{st.session_state.cached_yoe} years**)*")
-                st.write(f"*(Optimized Search Query: **{st.session_state.cached_query}**)*")
+                detected_role = st.session_state.get("cached_role", "Software Engineer")
+                detected_langs = st.session_state.get("cached_langs", [])
+                langs_display = f" | Target Stack: **{', '.join(detected_langs)}**" if detected_langs else ""
+                st.markdown(f"🎯 **AI Candidate Profile:** Role: **{detected_role}**{langs_display} | Experience: **{st.session_state.cached_yoe} yrs**")
+                st.caption(f"🔍 **Optimized Query:** `{st.session_state.cached_query}`")
 
                 col1, col2 = st.columns([1, 2])
                 with col1:

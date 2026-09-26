@@ -29,7 +29,8 @@ with DAG(
     default_args=default_args,
     description='End-to-end Job Market Pipeline',
     schedule='0 7 * * *', 
-    catchup=False
+    catchup=False,
+    max_active_runs=1
 ) as dag:
 
     # ==========================================

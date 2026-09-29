@@ -1,0 +1,284 @@
+import re
+
+svg_content = """<svg viewBox="0 0 1240 660" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      :root {
+        --bg: #FAFAFA;
+        --grid: #E8E8E8;
+        --text: #1A1A1A;
+        --text-muted: #666666;
+        --node-bg: #FFFFFF;
+        --node-border: #E0E0E0;
+        --node-shadow: rgba(0, 0, 0, 0.05);
+        --accent: #2563EB;
+        --accent-light: #EFF6FF;
+        --success: #059669;
+        --success-light: #ECFDF5;
+        --warning: #D97706;
+        --warning-light: #FFFBEB;
+        --purple: #7C3AED;
+        --purple-light: #F5F3FF;
+        --line: #CBD5E1;
+      }
+      
+      rect.bg { fill: var(--bg); }
+      path.grid { stroke: var(--grid); stroke-width: 1; fill: none; }
+      
+      .node rect { fill: var(--node-bg); stroke: var(--node-border); stroke-width: 1.5; rx: 8; }
+      .node rect.shadow { fill: var(--node-shadow); stroke: none; transform: translate(0, 4px); filter: blur(4px); }
+      
+      .node.source rect { stroke: var(--success); }
+      .node.source .icon-bg { fill: var(--success-light); }
+      
+      .node.process rect { stroke: var(--warning); }
+      .node.process .icon-bg { fill: var(--warning-light); }
+      
+      .node.storage rect { stroke: var(--accent); }
+      .node.storage .icon-bg { fill: var(--accent-light); }
+      
+      .node.ai rect { stroke: var(--purple); }
+      .node.ai .icon-bg { fill: var(--purple-light); }
+      
+      .node-title { fill: var(--text); font-family: system-ui, sans-serif; font-size: 14px; font-weight: 600; }
+      .node-desc { fill: var(--text-muted); font-family: system-ui, sans-serif; font-size: 11px; }
+      
+      .connection { stroke: var(--line); stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+      .connection.ai-flow { stroke: var(--purple); stroke-dasharray: 4 4; }
+      .connection.sync-flow { stroke: var(--warning); }
+      .connection.main-flow { stroke: var(--accent); }
+      
+      .zone-bg { fill: var(--node-bg); stroke: var(--node-border); stroke-width: 1; stroke-dasharray: 4 4; rx: 12; opacity: 0.5; }
+      .zone-title { fill: var(--text-muted); font-family: system-ui, sans-serif; font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; }
+    </style>
+    
+    <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M 1 1 L 7 4 L 1 7" fill="none" stroke="var(--line)" stroke-width="2" stroke-linecap="round"/>
+    </marker>
+    <marker id="arrowstart" markerWidth="8" markerHeight="8" refX="1" refY="4" orient="auto">
+      <path d="M 7 1 L 1 4 L 7 7" fill="none" stroke="var(--line)" stroke-width="2" stroke-linecap="round"/>
+    </marker>
+    
+    <marker id="arrowhead-main" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M 1 1 L 7 4 L 1 7" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/>
+    </marker>
+    
+    <marker id="arrowhead-ai" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M 1 1 L 7 4 L 1 7" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round"/>
+    </marker>
+    <marker id="arrowstart-ai" markerWidth="8" markerHeight="8" refX="1" refY="4" orient="auto">
+      <path d="M 7 1 L 1 4 L 7 7" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round"/>
+    </marker>
+
+    <marker id="arrowhead-sync" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M 1 1 L 7 4 L 1 7" fill="none" stroke="var(--warning)" stroke-width="2" stroke-linecap="round"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect class="bg" width="100%" height="100%"/>
+  <path class="grid" d="M 0 20 L 1240 20 M 0 40 L 1240 40 M 0 60 L 1240 60 M 0 80 L 1240 80 M 0 100 L 1240 100 M 0 120 L 1240 120 M 0 140 L 1240 140 M 0 160 L 1240 160 M 0 180 L 1240 180 M 0 200 L 1240 200 M 0 220 L 1240 220 M 0 240 L 1240 240 M 0 260 L 1240 260 M 0 280 L 1240 280 M 0 300 L 1240 300 M 0 320 L 1240 320 M 0 340 L 1240 340 M 0 360 L 1240 360 M 0 380 L 1240 380 M 0 400 L 1240 400 M 0 420 L 1240 420 M 0 440 L 1240 440 M 0 460 L 1240 460 M 0 480 L 1240 480 M 0 500 L 1240 500 M 0 520 L 1240 520 M 0 540 L 1240 540 M 0 560 L 1240 560 M 0 580 L 1240 580 M 0 600 L 1240 600 M 0 620 L 1240 620 M 0 640 L 1240 640" opacity="0.3"/>
+  <path class="grid" d="M 20 0 L 20 660 M 40 0 L 40 660 M 60 0 L 60 660 M 80 0 L 80 660 M 100 0 L 100 660 M 120 0 L 120 660 M 140 0 L 140 660 M 160 0 L 160 660 M 180 0 L 180 660 M 200 0 L 200 660 M 220 0 L 220 660 M 240 0 L 240 660 M 260 0 L 260 660 M 280 0 L 280 660 M 300 0 L 300 660 M 320 0 L 320 660 M 340 0 L 340 660 M 360 0 L 360 660 M 380 0 L 380 660 M 400 0 L 400 660 M 420 0 L 420 660 M 440 0 L 440 660 M 460 0 L 460 660 M 480 0 L 480 660 M 500 0 L 500 660 M 520 0 L 520 660 M 540 0 L 540 660 M 560 0 L 560 660 M 580 0 L 580 660 M 600 0 L 600 660 M 620 0 L 620 660 M 640 0 L 640 660 M 660 0 L 660 660 M 680 0 L 680 660 M 700 0 L 700 660 M 720 0 L 720 660 M 740 0 L 740 660 M 760 0 L 760 660 M 780 0 L 780 660 M 800 0 L 800 660 M 820 0 L 820 660 M 840 0 L 840 660 M 860 0 L 860 660 M 880 0 L 880 660 M 900 0 L 900 660 M 920 0 L 920 660 M 940 0 L 940 660 M 960 0 L 960 660 M 980 0 L 980 660 M 1000 0 L 1000 660 M 1020 0 L 1020 660 M 1040 0 L 1040 660 M 1060 0 L 1060 660 M 1080 0 L 1080 660 M 1100 0 L 1100 660 M 1120 0 L 1120 660 M 1140 0 L 1140 660 M 1160 0 L 1160 660 M 1180 0 L 1180 660 M 1200 0 L 1200 660 M 1220 0 L 1220 660" opacity="0.3"/>
+
+  <!-- Zones -->
+  <rect class="zone-bg" x="20" y="30" width="220" height="260"/>
+  <text class="zone-title" x="40" y="55">1. RAW DATA SOURCES</text>
+  
+  <rect class="zone-bg" x="250" y="30" width="690" height="400"/>
+  <text class="zone-title" x="270" y="55">2. DUCKDB LAKEHOUSE &amp; QDRANT VECTOR DB (ETL/ELT)</text>
+  
+  <rect class="zone-bg" x="20" y="470" width="1180" height="150"/>
+  <text class="zone-title" x="40" y="495">3. END-TO-END RAG PIPELINE (HYBRID SEARCH &amp; GENERATIVE COACH)</text>
+
+  <!-- Connections -->
+  
+  <!-- Scraper -> Landing -->
+  <path class="connection main-flow" d="M 125 144 V 200" marker-end="url(#arrowhead-main)"/>
+  <!-- Landing -> Bronze -->
+  <path class="connection main-flow" d="M 220 232 H 245 V 112 H 270" marker-end="url(#arrowhead-main)"/>
+  
+  <!-- Bronze <-> AI Extractor (Reads raw_jobs, writes raw_extractions) -->
+  <path class="connection ai-flow" d="M 330 144 V 200" marker-end="url(#arrowhead-ai)"/>
+  <path class="connection ai-flow" d="M 390 200 V 144" marker-end="url(#arrowhead-ai)"/>
+
+  <!-- Bronze -> Silver -->
+  <path class="connection main-flow" d="M 460 112 H 510" marker-end="url(#arrowhead-main)"/>
+  <!-- Silver -> Gold -->
+  <path class="connection main-flow" d="M 700 112 H 750" marker-end="url(#arrowhead-main)"/>
+  
+  <!-- Gold -> Tab 1 -->
+  <path class="connection main-flow" d="M 940 112 H 990" marker-end="url(#arrowhead-main)"/>
+  
+  <!-- Silver -> Tab 1 (Routing bypassing Gold) -->
+  <path class="connection main-flow" d="M 700 96 H 720 Q 730 96 730 86 V 55 Q 730 45 740 45 H 960 Q 970 45 970 55 V 96 H 990" marker-end="url(#arrowhead-main)"/>
+
+  <!-- Silver -> Sync -->
+  <path class="connection sync-flow" d="M 605 144 V 320" marker-end="url(#arrowhead-sync)"/>
+  <!-- Sync -> Qdrant -->
+  <path class="connection sync-flow" d="M 700 352 H 750" marker-end="url(#arrowhead-sync)"/>
+  
+  <!-- Silver -> Purge (Check days_open) -->
+  <path class="connection sync-flow" d="M 510 128 H 490 Q 480 128 480 138 V 342 Q 480 352 470 352 H 460" marker-end="url(#arrowhead-sync)"/>
+  <!-- Purge -> Bronze (UPDATE EXPIRED) -->
+  <path class="connection sync-flow" d="M 365 320 V 144" marker-end="url(#arrowhead-sync)"/>
+
+  <!-- RAG Pipeline Flow -->
+  <!-- CV -> Profiler -->
+  <path class="connection ai-flow" d="M 220 552 H 270" marker-end="url(#arrowhead-ai)"/>
+  <!-- Profiler -> Retriever -->
+  <path class="connection ai-flow" d="M 460 552 H 510" marker-end="url(#arrowhead-ai)"/>
+  <!-- Retriever <-> Qdrant -->
+  <path class="connection ai-flow" d="M 630 520 V 434 Q 630 424 640 424 H 845 V 384" marker-start="url(#arrowstart-ai)" marker-end="url(#arrowhead-ai)"/>
+  <!-- Retriever -> Reranker -->
+  <path class="connection ai-flow" d="M 700 552 H 750" marker-end="url(#arrowhead-ai)"/>
+  <!-- Reranker -> Tab 2 -->
+  <path class="connection ai-flow" d="M 940 552 H 990" marker-end="url(#arrowhead-ai)"/>
+
+
+  <!-- Nodes Definition Template: width=190, height=64 -->
+  
+  <!-- Col 1 -->
+  <!-- N_SCRAPE (30, 80) -->
+  <g class="node source" transform="translate(30, 80)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">Web Crawlers</text>
+    <text class="node-desc" x="50" y="48">SeleniumBase, curl_cffi</text>
+  </g>
+  
+  <!-- N_LANDING (30, 200) -->
+  <g class="node storage" transform="translate(30, 200)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">Landing Zone</text>
+    <text class="node-desc" x="50" y="48">Raw Parquet Files</text>
+  </g>
+  
+  <!-- N_PDF (30, 520) -->
+  <g class="node source" transform="translate(30, 520)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">User CV (PDF)</text>
+    <text class="node-desc" x="50" y="48">PyPDFLoader Upload</text>
+  </g>
+
+  <!-- Col 2 -->
+  <!-- N_BRONZE (270, 80) -->
+  <g class="node storage" transform="translate(270, 80)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">Bronze Layer</text>
+    <text class="node-desc" x="50" y="48">raw_*_jobs DuckDB</text>
+  </g>
+  
+  <!-- N_AI_EXTRACT (270, 200) -->
+  <g class="node ai" transform="translate(270, 200)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">AI Extractor</text>
+    <text class="node-desc" x="50" y="48">GPT-4o JSON Schema</text>
+  </g>
+  
+  <!-- N_PURGE (270, 320) -->
+  <g class="node process" transform="translate(270, 320)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">Purge Expired</text>
+    <text class="node-desc" x="50" y="48">Live URL Verify -> UPDATE</text>
+  </g>
+
+  <!-- N_PROFILER (270, 520) -->
+  <g class="node ai" transform="translate(270, 520)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">CV Profiler</text>
+    <text class="node-desc" x="50" y="48">GPT-4o YoE &amp; Skills</text>
+  </g>
+
+  <!-- Col 3 -->
+  <!-- N_SILVER (510, 80) -->
+  <g class="node storage" transform="translate(510, 80)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">Silver Layer (dbt)</text>
+    <text class="node-desc" x="50" y="48">silver_jobs, 7-day TTL</text>
+  </g>
+
+  <!-- N_SYNC (510, 320) -->
+  <g class="node process" transform="translate(510, 320)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">Vector Sync</text>
+    <text class="node-desc" x="50" y="48">Dense/Sparse Soft Delete</text>
+  </g>
+  
+  <!-- N_RETRIEVER (510, 520) -->
+  <g class="node process" transform="translate(510, 520)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">Hybrid Retriever</text>
+    <text class="node-desc" x="50" y="48">Qdrant Strict Bounds</text>
+  </g>
+
+  <!-- Col 4 -->
+  <!-- N_GOLD (750, 80) -->
+  <g class="node storage" transform="translate(750, 80)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">Gold Layer (dbt)</text>
+    <text class="node-desc" x="50" y="48">gold_* Analytics Marts</text>
+  </g>
+
+  <!-- N_QDRANT (750, 320) -->
+  <g class="node storage" transform="translate(750, 320)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">Qdrant DB</text>
+    <text class="node-desc" x="50" y="48">Embed-3 + FastEmbed BM25</text>
+  </g>
+  
+  <!-- N_RERANKER (750, 520) -->
+  <g class="node ai" transform="translate(750, 520)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">Reranker &amp; Analyst</text>
+    <text class="node-desc" x="50" y="48">BGE Top N + GPT-4o HR</text>
+  </g>
+
+  <!-- Col 5 -->
+  <!-- N_TAB1 (990, 80) -->
+  <g class="node source" transform="translate(990, 80)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">Tab 1: Dashboard</text>
+    <text class="node-desc" x="50" y="48">Streamlit SQL Analytics</text>
+  </g>
+  
+  <!-- N_TAB2 (990, 520) -->
+  <g class="node source" transform="translate(990, 520)">
+    <rect class="shadow" width="190" height="64"/>
+    <rect width="190" height="64"/>
+    <rect class="icon-bg" x="8" y="16" width="32" height="32" rx="6"/>
+    <text class="node-title" x="50" y="30">Tab 2: AI Coach</text>
+    <text class="node-desc" x="50" y="48">Streamlit Generative UI</text>
+  </g>
+
+</svg>"""
+
+with open("docs/assets/architecture.svg", "w") as f:
+    f.write(svg_content)
+print("SVG updated successfully!")

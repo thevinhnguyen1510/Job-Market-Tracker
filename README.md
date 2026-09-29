@@ -32,8 +32,7 @@ Imagine having a tireless personal assistant who wakes up every morning at 7:00 
 
 The platform follows a clean **3-Tier Medallion Architecture (Bronze $\rightarrow$ Silver $\rightarrow$ Gold)** with a dedicated **Hybrid Vector Database & RAG Serving Layer**.
 
-<img src="docs/assets/architecture.svg?sanitize=true" >
-
+![Lakehouse & RAG Pipeline Architecture](./docs/assets/architecture.svg)
 
 ---
 

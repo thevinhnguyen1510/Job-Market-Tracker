@@ -1,6 +1,5 @@
 <svg viewBox="0 0 1020 500" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="architecture-full-title architecture-full-desc">
-<defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap');
-
+<defs><style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
       --color-paper: #f5f5f5; --color-paper-2: #ececec;

@@ -23,9 +23,8 @@ styles = style_match.group(1) if style_match else ""
 if 'xmlns="http://www.w3.org/2000/svg"' not in svg_open:
     svg_open = svg_open.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"')
 
-# Inject styles and fonts
-font_import = "@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap');\n"
-injected_style = f"<defs><style>{font_import}{styles}</style></defs>"
+# Inject styles (WITHOUT external font imports, which violate GitHub/VSCode SVG CSP)
+injected_style = f"<defs><style>{styles}</style></defs>"
 
 final_svg = f"{svg_open}\n{injected_style}\n{svg_inner}\n{svg_close}"
 

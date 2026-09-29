@@ -18,19 +18,18 @@ try:
         # Tầng Bronze (Raw)
         "raw_topcv_jobs",
         "raw_itviec_jobs",
+        "raw_ai_extractions",
         
-        # Tầng Staging & Intermediate (dbt tạo ra)
-        "stg_topcv_jobs",
-        "stg_itviec_jobs",
-        "int_all_jobs",
-        
-        # Tầng Silver (AI xử lý)
+        # Tầng Silver (dbt)
+        "silver_jobs",
+        "silver_job_skills",
         "silver_all_jobs",
         
-        # Tầng Gold (dbt tổng hợp)
+        # Tầng Gold (dbt)
         "gold_role_summary",
         "gold_tech_stack_by_level",
-        "gold_tech_stack_counts"
+        "gold_tech_stack_counts",
+        "gold_skill_cooccurrence"
     ]
 
     for table in tables_to_drop:

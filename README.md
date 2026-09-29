@@ -30,61 +30,13 @@ Imagine having a tireless personal assistant who wakes up every morning at 7:00 
 
 ## 1. System Architecture & Real Execution Flow
 
-The platform is designed following the **Medallion Architecture (Landing $\rightarrow$ Bronze $\rightarrow$ Staging/Intermediate $\rightarrow$ Silver $\rightarrow$ Gold)** with a dedicated **Hybrid Vector Database & RAG Serving Layer**.
+The platform follows a clean **3-Tier Medallion Architecture (Bronze $\rightarrow$ Silver $\rightarrow$ Gold)** with a dedicated **Hybrid Vector Database & RAG Serving Layer**.
 
-```mermaid
-flowchart TD
-    %% PHASE 1: CRAWL & ENRICH
-    subgraph PHASE1["Phase 1: Parallel Web Scraping & Landing Zone"]
-        direction TB
-        subgraph BRANCH_ITVIEC["ITViec Pipeline (curl_cffi)"]
-            A1["crawl_data_from_ITVIEC.py<br/>(Chrome 120 TLS Impersonation)"] --> A2["itviec_raw_*.parquet"]
-            A2 --> A3["enrich_job_details_ITVIEC.py<br/>(DOM Check: .job-actions warning)"]
-            A3 --> A4["itviec_enriched_*.parquet<br/>in data/landing/itviec/"]
-        end
-
-        subgraph BRANCH_TOPCV["TopCV Pipeline (SeleniumBase UC + FlareSolverr)"]
-            B1["crawl_data_from_TOPCV.py<br/>(Undetected Chrome + Xvfb)"] --> B2["topcv_raw_*.parquet"]
-            B2 --> B3["enrich_job_details_TOPCV.py<br/>(FlareSolverr Cloudflare Bypass + .box-apply-expired)"]
-            B3 --> B4["topcv_enriched_*.parquet<br/>in data/landing/topcv/"]
-        end
-    end
-
-    %% PHASE 2: BRONZE
-    subgraph PHASE2["Phase 2: Bulk Ingestion to Bronze"]
-        A4 & B4 --> INGEST["ingest_landing_to_bronze.py<br/>(Ultra-Fast Parquet Bulk Upsert)"]
-        INGEST --> ARCHIVE["data/archive/ (Audited Files)"]
-        INGEST --> BRONZE[("job_market.duckdb<br/>raw_itviec_jobs & raw_topcv_jobs")]
-    end
-
-    %% PHASE 3: DBT STAGING & INTERMEDIATE
-    subgraph PHASE3["Phase 2.5: dbt Staging & Intermediate Transformation"]
-        BRONZE --> STG["dbt Staging Models<br/>(stg_itviec_jobs & stg_topcv_jobs<br/>Deduplication via ROW_NUMBER)"]
-        STG --> INT["dbt Intermediate Model<br/>(int_all_jobs: Unified Schema UNION ALL)"]
-    end
-
-    %% PHASE 4: SILVER AI & CLEANUP
-    subgraph PHASE4["Phase 3: GenAI Extraction & Lifecycle (Silver Layer)"]
-        INT --> AI_ITV["ai_extractor.py itviec<br/>(AsyncOpenAI + Semaphore 6 + Instructor)"]
-        INT --> AI_TOP["ai_extractor.py topcv<br/>(Pydantic Data Contract Validation)"]
-        AI_ITV & AI_TOP --> SILVER[("silver_all_jobs<br/>Standardized Role, Level, YOE, Skills, Status")]
-        SILVER --> CLEAN["cleanup_jobs.py<br/>(TTL: Mark Inactive if not seen in 3 days)"]
-    end
-
-    %% PHASE 5: GOLD & VECTOR SYNC
-    subgraph PHASE5["Phase 4: dbt Analytics Marts & Vector DB Sync"]
-        CLEAN --> DBT_GOLD["dbt run --select gold<br/>(gold_role_summary, gold_tech_stack_counts)"]
-        DBT_GOLD --> DBT_TEST["dbt test<br/>(Data Quality Contracts: unique, not_null)"]
-        DBT_TEST --> SYNC_QDRANT["sync_qdrant.py<br/>(Purge Inactive Points, Upsert Daily Vectors)"]
-        SYNC_QDRANT --> QDRANT[("Qdrant Local Vector DB<br/>Dense 1536d + BM25 Sparse")]
-    end
-
-    %% PHASE 6: SERVING
-    subgraph PHASE6["Phase 5: User Interface & Enterprise RAG"]
-        SILVER -.->|Read-Only DuckDB| APP_DASH["Tab 1: Market Intelligence Dashboard<br/>(Macro Stats, Salary Trends, Skills Heatmap)"]
-        QDRANT -.->|Hybrid Search + BGE Reranker| APP_RAG["Tab 2: AI Career Coach<br/>(CV Parser -> YOE Filter -> Gap Analysis)"]
-    end
-```
+<div align="center">
+  <a href="docs/assets/architecture.svg">
+    <img src="docs/assets/architecture.svg" alt="Lakehouse & RAG Pipeline Architecture" width="100%">
+  </a>
+</div>
 
 ---
 
@@ -95,9 +47,9 @@ Job postings change rapidly: recruiters take down jobs, or listings expire while
 | Layer | Component | Mechanism | Result |
 | :--- | :--- | :--- | :--- |
 | **Tier 1: Front-Door Extraction** | `enrich_job_details_*.py` | Inspects live HTML DOM selectors for expiration banners (`.job-actions .bg-light-warning-color` on ITViec, `.box-apply-expired` on TopCV). | Dead jobs are marked with `job_description = 'EXPIRED'` before reaching AI. |
-| **Tier 2: AI Staging Gatekeeper** | `ai_extractor.py` | Automatically flags any `EXPIRED` jobs in the Silver table as `status = 'Inactive'`. | Skips calling OpenAI, saving 100% of LLM tokens on dead jobs. |
-| **Tier 3: Time-to-Live (TTL) Absence Detection** | `cleanup_jobs.py` | Synchronizes `last_seen_at` with actual crawl timestamps from raw tables and marks jobs missing for **> 3 days** as `Inactive`. | Automatically expires jobs that recruiters quietly delisted without leaving a 410/404 page. |
-| **Tier 4: On-Demand Deep Maintenance & Vector Purge** | `purge_expired_jobs.py` & `sync_qdrant.py` | Maintenance crawler checks live HTTP status codes (410/404) and DOM banners with anti-bot pacing. `sync_qdrant.py` removes all inactive points from Qdrant. | Keeps the Vector database 100% synchronized with active listings. |
+| **Tier 2: AI Staging Gatekeeper** | `ai_extractor.py` | Automatically flags any `EXPIRED` jobs as `status = 'Inactive'` and skips LLM API calls. | Skips calling OpenAI, saving 100% of LLM tokens on dead jobs. |
+| **Tier 3: Time-to-Live (TTL) & Lifecycle Tracking** | `silver_jobs.sql` | Calculates `days_open = CURRENT_DATE - first_seen_at`. If a job is not re-crawled within **7 days**, it automatically transitions to `status = 'Inactive'`. | Prevents false expirations over weekends while ensuring closed postings naturally lapse. |
+| **Tier 4: Adaptive Verification & Qdrant Soft Delete** | `purge_expired_jobs.py` & `sync_qdrant.py` | Targeted crawler checks live HTTP status/DOM banners **only on high-risk jobs** (`days_open >= 7`), reducing network requests by 87%. Inactive jobs are **Soft Deleted** (`is_active = False`) in Qdrant, preventing vector data loss and allowing instant reactivation. | Keeps the Vector database 100% synchronized with active listings without destructive point deletion. |
 
 ---
 
@@ -111,49 +63,48 @@ Job postings change rapidly: recruiters take down jobs, or listings expire while
 - **Decoupled Landing Zone:**
   Crawlers write files to `data/landing/` without touching the database directly, completely eliminating file locking conflicts.
 
-### Phase 2: Centralized Bronze Ingestion
+### Phase 2: Bronze Ingestion & AI Enrichment
 - `scripts/ingest_landing_to_bronze.py`:
-  Connects to DuckDB for less than 1 second to perform high-speed bulk ingestion (`read_parquet`) into `raw_itviec_jobs` and `raw_topcv_jobs`, then archives files to `data/archive/`.
+  Connects to DuckDB for less than 1 second to perform high-speed bulk ingestion (`read_parquet`) into `raw_itviec_jobs` and `raw_topcv_jobs`, initializes `first_seen_at`, and archives processed files to `data/archive/`.
+- `scripts/ai_extractor.py`:
+  Extracts structured fields using `AsyncOpenAI` and `Instructor` (rate-limited via Semaphore), persisting 100% of extractions into the permanent `raw_ai_extractions` Bronze table.
 
-### Phase 2.5: dbt Staging & Intermediate Transformation
-- **Staging (`stg_itviec_jobs`, `stg_topcv_jobs`):**
-  Deduplicates job entries using `ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY crawl_timestamp DESC)`.
-- **Intermediate (`int_all_jobs`):**
-  Unifies heterogeneous fields into a single canonical structure.
+### Phase 3: Silver Transformation (dbt Core Engine)
+- **`silver_jobs.sql`:**
+  - Unified deduplication using `ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY crawl_timestamp DESC)`.
+  - Normalizes Vietnamese locations (Hà Nội, Hồ Chí Minh, Đà Nẵng, Remote).
+  - Automated salary parsing via `parse_salary.sql` macro (`salary_min_vnd`, `salary_max_vnd`, `salary_avg_vnd`).
+  - Lifecycle tracking (`first_seen_at`, `days_open`) and 7-day TTL status calculation.
+- **`silver_job_skills.sql`:**
+  - Unnests AI-extracted JSON skill arrays and joins with `tech_skill_taxonomy.csv` seed.
+- **`silver_all_jobs.sql`:**
+  - Zero-maintenance backward-compatibility view serving queries seamlessly.
 
-### Phase 3: GenAI Extraction & Silver Layer
-- **Async AI Extractor (`scripts/ai_extractor.py`):**
-  Powered by `AsyncOpenAI` and controlled via `asyncio.Semaphore(6)` for high-throughput, rate-limit-safe extraction.
-- **Enforced Data Contract (Pydantic & Instructor):**
-  Extracts standardized fields:
-  - `min_years_of_experience`: Minimum practical years required (integer).
-  - `core_tech_stack`: Top 5 primary technologies (e.g., `["Python", "SQL", "AWS"]`).
-  - `job_role`: Standardized category (`Backend`, `Data Engineer`, `DevOps/Cloud`, etc.).
-  - `job_level`: Hierarchy level (`Intern`, `Fresher`, `Junior`, `Middle`, `Senior`).
-  - `english_requirement`: Categorized communication requirement.
-- **Job Lifecycle Manager (`scripts/cleanup_jobs.py`):**
-  Automatically deactivates stale listings older than 3 days.
-
-### Phase 4: dbt Analytics Marts & Vector Synchronization
+### Phase 4: Gold Analytics Marts & Vector Synchronization
 - **Gold Marts (`dbt run --select gold`):**
-  Aggregates market metrics such as role distributions and tech stack rankings.
-- **Data Quality Gate (`dbt test`):**
-  Enforces uniqueness, non-null values, and accepted value sets before updating vectors.
-- **Vector DB Sync (`scripts/sync_qdrant.py`):**
-  - Removes vector points for jobs whose status is no longer `Active`.
+  - `gold_role_summary`: Aggregate metrics per role.
+  - `gold_tech_stack_counts`: Most in-demand technical skills.
+  - `gold_tech_stack_by_level`: Tech stack demand across seniority levels.
+  - `gold_skill_cooccurrence`: Frequent skill pairs in job listings.
+  - `gold_salary_benchmark`: Statistical salary distribution (Min, P25, Median, P75, Max, Avg) by Role and Level.
+- **Data Quality Contracts (`dbt test`):**
+  - Enforces uniqueness, non-null values, and accepted value sets before vector sync.
+- **Qdrant Vector DB Soft-Delete Sync (`scripts/sync_qdrant.py`):**
+  - Applies `is_active = False` payload to inactive jobs without destructive deletions.
   - Generates Dense Embeddings (`text-embedding-3-small`) and Sparse BM25 Embeddings (`FastEmbedSparse`) for **Hybrid Vector Search**.
 
 ### Phase 5: Streamlit Serving & AI Career Coach
 - **Tab 1 - Market Intelligence Dashboard:**
-  Interactive dashboard powered by DuckDB (read-only mode), displaying real-time metrics, role salary distributions, tech stack rankings, and language requirements.
+  - Macro Market Overview (Market Structure, Job Levels, Required Experience).
+  - Dynamic Role-Specific Deep Dive (Filterable Tech Stack & English Demand).
+  - **Tech Salary Benchmark** (Interactive salary distribution charts and summary table from `gold_salary_benchmark`).
 - **Tab 2 - AI Career Coach (Two-Stage Enterprise RAG):**
   1. Candidate uploads a resume in PDF format.
-  2. `PyPDFLoader` extracts text, and GPT-4o-mini determines practical experience (Years of Experience) and career focus.
-  3. Strict metadata filtering is applied to Qdrant: `metadata.yoe <= candidate_yoe + 1`.
-  4. Hybrid Search retrieves the Top 30 candidate positions.
-  5. Local Cross-Encoder Reranker (`BAAI/bge-reranker-base`) reranks the Top 10 best fits.
-  6. Real-time verification against DuckDB ensures no expired jobs are displayed.
-  7. GPT-4o-mini generates a skills gap analysis and a personalized 30-day preparation roadmap.
+  2. `PyPDFLoader` extracts text, and GPT-4o-mini determines practical experience (Years of Experience), Target Role, and Primary Tech Stack.
+  3. Smart Gatekeeper & Soft Scoring matches candidates against active listings.
+  4. Local Cross-Encoder Reranker (`BAAI/bge-reranker-base`) reranks the Top matching fits.
+  5. Rich job cards display Company Name, Source, `days_open` freshness badge, and disclosed salary.
+  6. GPT-4o-mini generates a comprehensive skills gap analysis and a personalized 30-day preparation roadmap.
 
 ---
 
@@ -163,12 +114,12 @@ Job postings change rapidly: recruiters take down jobs, or listings expire while
 | :--- | :--- | :--- |
 | **Orchestration** | Apache Airflow 2.8.1 | CeleryExecutor with Redis & PostgreSQL for robust scheduling |
 | **Data Lakehouse** | DuckDB | Columnar OLAP engine for fast aggregation and transformation |
-| **Transformation** | dbt (data build tool) | Medallion architecture (Staging $\rightarrow$ Intermediate $\rightarrow$ Gold) + testing |
-| **Vector Engine** | Qdrant Local | Hybrid Search (Dense 1536-dim + BM25 Sparse Vectors) |
+| **Transformation** | dbt (data build tool) | 3-Tier Medallion architecture (Silver $\rightarrow$ Gold) + data contracts & testing |
+| **Vector Engine** | Qdrant Local | Hybrid Search (Dense 1536-dim + BM25 Sparse Vectors) with Soft Delete |
 | **LLM & Structuring** | OpenAI GPT-4o-mini + Instructor | Async structured information extraction via Pydantic v2 schemas |
 | **Reranking** | HuggingFace BAAI/bge-reranker-base | Cross-Encoder for high-precision CV-to-job matching |
 | **Web Scraping** | curl_cffi, SeleniumBase, FlareSolverr | Anti-bot bypass, TLS fingerprinting, and Cloudflare challenge solving |
-| **User Interface** | Streamlit + Plotly Express | Interactive analytical dashboard and career assistant |
+| **User Interface** | Streamlit + Plotly Express | Interactive analytical dashboard with salary benchmarks & AI Career Coach |
 
 ---
 
@@ -185,10 +136,13 @@ de-job-market-tracker/
 ├── analytics_dbt/                    # dbt transformation project
 │   ├── dbt_project.yml               # dbt configuration
 │   ├── profiles.yml                  # Cross-platform profile (Local & Docker)
+│   ├── macros/
+│   │   └── parse_salary.sql          # Automated VND salary regex & unit conversion macro
+│   ├── seeds/
+│   │   └── tech_skill_taxonomy.csv   # Canonical tech skill categorization seed
 │   └── models/
-│       ├── staging/                  # Deduplication & source standardization
-│       ├── intermediate/             # int_all_jobs union model
-│       └── marts/                    # Gold analytics marts
+│       ├── silver/                   # Unified silver models (silver_jobs, silver_job_skills, silver_all_jobs)
+│       └── gold/                     # Analytics marts (gold_salary_benchmark, gold_role_summary, etc.)
 ├── dags/
 │   └── it_job_pipeline.py            # Airflow DAG definition (Runs daily at 07:00 AM VN)
 ├── data/
@@ -203,10 +157,10 @@ de-job-market-tracker/
     ├── crawl_data_from_TOPCV.py      # TopCV list crawler (SeleniumBase UC)
     ├── enrich_job_details_TOPCV.py   # TopCV JD details enricher (FlareSolverr)
     ├── ingest_landing_to_bronze.py   # Parquet Landing Zone to DuckDB Bronze Ingestor
-    ├── ai_extractor.py               # Async LLM Structured Data Extractor (Silver layer)
-    ├── cleanup_jobs.py               # Job lifecycle manager (Stale job deactivator)
-    ├── purge_expired_jobs.py         # On-demand deep URL maintenance & verification
-    └── sync_qdrant.py                # Hybrid Vector Sync to Qdrant
+    ├── ai_extractor.py               # Async LLM Structured Data Extractor (writes to raw_ai_extractions)
+    ├── cleanup_jobs.py               # Silver layer audit & statistics reporter
+    ├── purge_expired_jobs.py         # Adaptive URL verification (days_open >= 7) & Soft Delete trigger
+    └── sync_qdrant.py                # Safe Hybrid Vector Sync with Soft Delete (is_active=False)
 ```
 
 ---
@@ -279,24 +233,23 @@ python scripts/enrich_job_details_TOPCV.py
 # 2. Ingest landing Parquet files into DuckDB Bronze
 python scripts/ingest_landing_to_bronze.py
 
-# 3. Transform through dbt Staging & Intermediate
-cd analytics_dbt
-dbt run --select staging intermediate
-cd ..
-
-# 4. Extract structured fields with AI & clean up expired jobs
+# 3. Extract structured fields with AI into raw_ai_extractions
 python scripts/ai_extractor.py itviec
 python scripts/ai_extractor.py topcv
-python scripts/cleanup_jobs.py
 
-# 5. Build Gold analytics marts & verify quality tests
+# 4. Transform through dbt Silver & Gold layers
 cd analytics_dbt
+dbt seed
+dbt run --select silver
 dbt run --select gold
 dbt test
 cd ..
 
-# 6. Sync active jobs into Qdrant Vector DB
+# 5. Sync active jobs into Qdrant Vector DB (Soft Delete enabled)
 python scripts/sync_qdrant.py
+
+# 6. (Optional) Run Adaptive Expiration Verification for high-risk jobs (days_open >= 7)
+python scripts/purge_expired_jobs.py
 
 # 7. Start the Web Dashboard & AI Career Coach
 streamlit run app.py

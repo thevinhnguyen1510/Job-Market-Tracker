@@ -57,6 +57,19 @@ def load_embedding_models():
 def get_reranker_model():
     return HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
 
+@st.cache_resource(show_spinner=False)
+def get_qdrant_vectorstore():
+    # Instantiate Qdrant client once per Streamlit session to avoid lock errors
+    client = QdrantClient(path=QDRANT_PATH)
+    dense, sparse = load_embedding_models()
+    return QdrantVectorStore(
+        client=client,
+        collection_name=COLLECTION_NAME,
+        embedding=dense,
+        sparse_embedding=sparse,
+        retrieval_mode=RetrievalMode.HYBRID
+    )
+
 # Only load lightweight embeddings globally so dashboard loads instantly
 embeddings, sparse_embeddings = load_embedding_models()
 
@@ -248,6 +261,119 @@ with tab1:
                 # Fixed Streamlit warning here
                 st.plotly_chart(fig_eng, width="stretch")
 
+        # ==========================================
+        # SECTION 3: SALARY BENCHMARK (GOLD DATA MART)
+        # ==========================================
+        st.divider()
+        st.markdown("#### 💰 3. Tech Salary Benchmark (Gold Data Mart)")
+        st.markdown("Salary statistics across **Roles & Seniority Levels** automatically calculated from the **Gold Data Mart** (`gold_salary_benchmark`). Values displayed in **Million VND / month**.")
+
+        # Metric cards
+        sal_summary = conn.execute("""
+            SELECT 
+                COUNT(*) as total_disclosed,
+                ROUND(MEDIAN(salary_avg_vnd), 1) as overall_median,
+                ROUND(AVG(salary_avg_vnd), 1) as overall_avg
+            FROM silver_all_jobs
+            WHERE salary_avg_vnd > 0 AND status = 'Active'
+        """).fetchone()
+
+        top_paying = conn.execute("""
+            SELECT job_role, job_level, median_salary_vnd
+            FROM gold_salary_benchmark
+            WHERE median_salary_vnd > 0
+            ORDER BY median_salary_vnd DESC
+            LIMIT 1
+        """).fetchone()
+
+        col_s1, col_s2, col_s3 = st.columns(3)
+        col_s1.metric("Disclosed Salary Jobs", f"{sal_summary[0]:,}")
+        col_s2.metric("Market Median Tech Salary", f"{sal_summary[1]}M VND/mo")
+        if top_paying:
+            col_s3.metric("Top Paying Role & Level", f"{top_paying[0]} ({top_paying[1]})", f"{top_paying[2]}M VND median")
+        else:
+            col_s3.metric("Top Paying Role", "N/A")
+
+        # Query salary benchmark data
+        df_salary_bench = conn.execute("""
+            SELECT 
+                job_role,
+                job_level,
+                total_salary_disclosed_jobs,
+                min_salary_vnd,
+                p25_salary_vnd,
+                median_salary_vnd,
+                p75_salary_vnd,
+                max_salary_vnd,
+                avg_salary_vnd
+            FROM gold_salary_benchmark
+            WHERE median_salary_vnd > 0
+            ORDER BY job_role, 
+                CASE job_level
+                    WHEN 'Intern' THEN 1
+                    WHEN 'Fresher' THEN 2
+                    WHEN 'Junior' THEN 3
+                    WHEN 'Middle' THEN 4
+                    WHEN 'Senior' THEN 5
+                    WHEN 'Manager' THEN 6
+                    WHEN 'Director' THEN 7
+                    ELSE 8
+                END
+        """).df()
+
+        if not df_salary_bench.empty:
+            all_roles = sorted(df_salary_bench['job_role'].unique().tolist())
+            selected_roles = st.multiselect(
+                "🎯 Filter by Job Role:",
+                options=all_roles,
+                default=[r for r in ["Data Engineer", "Data/Business Analyst", "AI/Machine Learning", "Backend"] if r in all_roles] or all_roles[:4]
+            )
+
+            if selected_roles:
+                df_salary_filtered = df_salary_bench[df_salary_bench['job_role'].isin(selected_roles)]
+            else:
+                df_salary_filtered = df_salary_bench
+
+            fig_salary = px.bar(
+                df_salary_filtered,
+                x='job_role',
+                y='median_salary_vnd',
+                color='job_level',
+                barmode='group',
+                title="Median Monthly Salary by Role & Seniority Level (Million VND)",
+                labels={'median_salary_vnd': 'Median Salary (M VND)', 'job_role': 'Job Role', 'job_level': 'Level'},
+                category_orders={"job_level": ["Intern", "Fresher", "Junior", "Middle", "Senior", "Manager", "Director"]},
+                text_auto='.1f',
+                color_discrete_sequence=px.colors.qualitative.Bold
+            )
+            fig_salary.update_layout(
+                xaxis_title="",
+                yaxis_title="Million VND / Month",
+                legend_title="Level",
+                margin=dict(t=40, b=0, l=0, r=0)
+            )
+            st.plotly_chart(fig_salary, width="stretch")
+
+            with st.expander("📋 View Detailed Salary Distribution (P25 - Median - P75 - Min/Max)"):
+                display_cols = {
+                    'job_role': 'Role',
+                    'job_level': 'Level',
+                    'total_salary_disclosed_jobs': 'Disclosed Jobs',
+                    'min_salary_vnd': 'Min (M)',
+                    'p25_salary_vnd': 'P25 (M)',
+                    'median_salary_vnd': 'Median (M)',
+                    'p75_salary_vnd': 'P75 (M)',
+                    'max_salary_vnd': 'Max (M)',
+                    'avg_salary_vnd': 'Average (M)'
+                }
+                st.dataframe(
+                    df_salary_filtered.rename(columns=display_cols),
+                    width="stretch",
+                    hide_index=True
+                )
+        else:
+            st.info("Insufficient disclosed salary data to display distribution chart.")
+
     except Exception as e:
         st.error(f"Dashboard query error: {e}")
     finally:
@@ -315,10 +441,10 @@ with tab2:
                         Return a STRICT JSON object (no markdown, no backticks, only valid raw JSON):
                         {{
                             "yoe": <integer, practical years of work experience excluding university/internship study>,
-                            "target_role": "<primary job role, choose closest from: 'Backend', 'Frontend', 'Fullstack', 'Mobile', 'Data Engineer', 'Data Scientist', 'Data/Business Analyst', 'AI/Machine Learning', 'DevOps/Cloud', 'QA/QC/Tester'>",
+                            "target_role": "<primary job role, choose closest from: 'Backend', 'Software Engineer', 'Frontend', 'Fullstack', 'Mobile', 'Data Engineer', 'Data Scientist', 'Data/Business Analyst', 'AI/Machine Learning', 'DevOps/Cloud', 'QA/QC/Tester'>",
                             "primary_languages": [<list of 1-3 primary programming languages/technologies the candidate specializes in, e.g. ["C#", ".NET"] or ["Java"] or ["Python"] or ["JavaScript/TypeScript"]>],
                             "core_skills": [<list of main frameworks/tools/databases, e.g. ["ASP.NET Core", "SQL Server", "Entity Framework", "Redis", "RESTful API"]>],
-                            "search_summary": "<A 1-sentence dense summary strictly focusing on role and tech stack, e.g. 'Junior Backend Developer specializing in C#, .NET, ASP.NET Core, SQL Server, Redis, RESTful API'>"
+                            "search_summary": "<A 1-sentence dense summary strictly focusing on role and tech stack, e.g. 'Junior Backend / Software Engineer specializing in C#, .NET, ASP.NET Core, SQL Server, Redis, RESTful API'>"
                         }}
 
                         CV Text:
@@ -348,112 +474,55 @@ with tab2:
                         search_query = candidate_profile.get("search_summary", cv_text[:500])
 
                         # STEP 2: MULTI-STAGE RETRIEVAL & SMART GATEKEEPER
-                        status.update(label="3. Filtering jobs by Target Role & Primary Tech Stack...")
+                        status.update(label="3. Filtering jobs by Target Role & Tech Stack (Qdrant Hybrid Search)...")
 
-                        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-                        db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
+                        from qdrant_client.models import Filter, FieldCondition, Range, MatchValue, IsNullCondition, PayloadField
 
-                        conn_match = duckdb.connect(db_path, read_only=True)
-                        all_active_df = conn_match.execute("""
-                            SELECT job_id, job_url, job_title, ai_job_role, ai_core_tech_stack, min_years_of_experience, job_level, source, english_requirement
-                            FROM silver_all_jobs
-                            WHERE status = 'Active'
-                        """).df()
-                        conn_match.close()
+                        vectorstore = get_qdrant_vectorstore()
 
-                        # Incompatible roles to prevent cross-domain mismatch (e.g. Backend vs Data Analyst)
-                        incompatible_roles = {
-                            "Backend": ["Data/Business Analyst", "Data Scientist", "UI/UX Designer", "Product Owner/Manager", "QA/QC/Tester"],
-                            "Frontend": ["Data/Business Analyst", "Data Scientist", "AI/Machine Learning", "DevOps/Cloud"],
-                            "Fullstack": ["Data/Business Analyst", "Data Scientist", "UI/UX Designer", "Product Owner/Manager"],
-                            "Data Engineer": ["Frontend", "UI/UX Designer", "Mobile"],
-                            "Data/Business Analyst": ["Mobile", "Frontend", "DevOps/Cloud"],
-                            "AI/Machine Learning": ["Frontend", "UI/UX Designer", "Mobile"],
-                            "DevOps/Cloud": ["Frontend", "UI/UX Designer", "Data/Business Analyst"],
-                            "Mobile": ["Data/Business Analyst", "Data Scientist", "AI/Machine Learning", "DevOps/Cloud"],
-                            "QA/QC/Tester": ["Data Scientist", "AI/Machine Learning"]
-                        }
+                        # Role gatekeeper normalization
+                        is_backend_candidate = any(b in target_role.lower() for b in ["backend", "software engineer"])
+                        search_role = "Backend / Software Engineer" if is_backend_candidate else target_role
+                        
+                        # Build dense/sparse optimized query
+                        qdrant_query = f"{search_role} {', '.join(primary_langs)} {', '.join(core_skills)} {search_query}"
 
-                        banned_roles = incompatible_roles.get(target_role, [])
-                        primary_langs_lower = [p.lower() for p in primary_langs]
-                        core_skills_lower = [c.lower() for c in core_skills]
-
-                        candidates_pool = []
-
-                        for _, row in all_active_df.iterrows():
-                            role = str(row['ai_job_role'])
-                            title = str(row['job_title'])
-                            tech_str = str(row['ai_core_tech_stack']).lower()
-                            yoe = row['min_years_of_experience']
-
-                            # 1. GATEKEEPER: Chặn triệt để khác Role
-                            if role in banned_roles:
-                                continue
-
-                            # 2. TECH STACK MATCHING:
-                            matched_primary = any(p in tech_str or p in title.lower() for p in primary_langs_lower)
-
-                            score = 0
-                            if matched_primary:
-                                score += 150 # Ưu tiên tuyệt đối job đúng tech stack chính
-                            else:
-                                # Nếu ứng viên có stack chính rõ ràng (như C#/.NET), không nhồi job Java/Python/Golang vào
-                                competing_major_langs = ["java", "spring boot", "python", "golang", "go", "php", "ruby", "rust"]
-                                has_competing_only = any(lang in tech_str or lang in title.lower() for lang in competing_major_langs)
-                                if has_competing_only and primary_langs_lower:
-                                    continue
-                                score += 10
-
-                            # Match kỹ năng phụ / công cụ / DB
-                            matched_skills_count = sum(1 for s in core_skills_lower if s in tech_str or s in title.lower())
-                            score += matched_skills_count * 10
-
-                            # Thưởng điểm cho Role
-                            if target_role.lower() in role.lower() or target_role.lower() in title.lower():
-                                score += 30
-                            elif "developer" in title.lower() or "engineer" in title.lower() or "software" in title.lower():
-                                score += 10
-
-                            # YOE Soft Scoring (Không loại cứng, ưu tiên cấp bậc hợp lý)
-                            if yoe is not None:
-                                diff = yoe - candidate_yoe
-                                if diff <= 0:
-                                    score += 30 # Entry / Junior
-                                elif diff <= 2:
-                                    score += 20 # 1-2 năm chênh lệch (vừa sức ứng tuyển)
-                                elif diff <= 4:
-                                    score += 5  # Middle / Senior
-                                else:
-                                    score -= 30 # Yêu cầu quá cao
-                            else:
-                                score += 15
-
-                            doc = Document(
-                                page_content=f"Source: {row['source']} | Title: {row['job_title']} | Tech: {row['ai_core_tech_stack']} | Level: {row['job_level']} | Exp: {row['min_years_of_experience']} years | English: {row['english_requirement']}",
-                                metadata={
-                                    "job_id": row['job_id'],
-                                    "job_title": row['job_title'],
-                                    "job_url": row['job_url'],
-                                    "yoe": row['min_years_of_experience'],
-                                    "source": row['source'],
-                                    "status": "Active",
-                                    "score": score
-                                }
-                            )
-                            candidates_pool.append((score, doc))
-
-                        candidates_pool.sort(key=lambda x: x[0], reverse=True)
-                        top_candidates = [doc for score, doc in candidates_pool[:20]]
+                        # Hard Filter: Active Jobs + YoE <= Candidate YoE + 2 (OR yoe is missing/null)
+                        yoe_filter = Filter(
+                            must=[
+                                FieldCondition(
+                                    key="metadata.is_active",
+                                    match=MatchValue(value=True)
+                                ),
+                                Filter(
+                                    should=[
+                                        FieldCondition(
+                                            key="metadata.yoe",
+                                            range=Range(lte=candidate_yoe + 2)
+                                        ),
+                                        IsNullCondition(
+                                            is_null=PayloadField(key="metadata.yoe")
+                                        )
+                                    ]
+                                )
+                            ]
+                        )
+                        
+                        top_candidates = vectorstore.similarity_search(
+                            query=qdrant_query,
+                            k=30,
+                            filter=yoe_filter
+                        )
 
                         if not top_candidates:
-                            st.warning(f"⚠️ Hiện tại chưa tìm thấy công việc **{target_role}** phù hợp với Tech Stack (**{', '.join(primary_langs)}**) trong cơ sở dữ liệu hiện tại.")
-                            st.info("💡 **Gợi ý:** Cơ sở dữ liệu hiện tại tập trung nhiều vào Data Engineer, Data Analyst, AI/ML. Bạn có thể mở rộng danh sách từ khóa cào dữ liệu cho pipeline để thu thập thêm các job Backend / .NET!")
+                            st.warning(f"⚠️ Currently, no active **{target_role}** positions matching Tech Stack (**{', '.join(primary_langs)}**) were found in the database.")
+                            st.info("💡 **Tip:** The current database is strongly populated with Data Engineer, Data Analyst, AI/ML roles. Expand crawler search keywords to collect more specialized postings!")
                             st.stop()
 
                         # STEP 3: RERANKER (DEEP RE-RANKING ON FILTERED CANDIDATES)
                         status.update(label="4. Deep Search & Reranking Top matches...")
                         bge_reranker_model = get_reranker_model()
-                        compressor = CrossEncoderReranker(model=bge_reranker_model, top_n=6)
+                        compressor = CrossEncoderReranker(model=bge_reranker_model, top_n=12)
                         try:
                             matched_jobs = compressor.compress_documents(top_candidates, search_query)
                         except Exception:
@@ -524,12 +593,33 @@ with tab2:
                 with col1:
                     st.info("📌 **Top Best Matching Jobs:**")
                     for job in st.session_state.cached_matched_jobs:
-                        title = job.metadata.get("job_title", "View Job Details")
+                        raw_title = str(job.metadata.get("job_title", "View Job Details"))
+                        import re
+                        # Clean up TopCV prefixes and replace newlines with spaces
+                        title = re.sub(r'^(Tin mới Nổi bật|Nổi bật|Tin mới)\s*', '', raw_title, flags=re.IGNORECASE)
+                        title = re.sub(r'\s+', ' ', title).strip()
                         url = job.metadata.get("job_url", "#")
                         source = job.metadata.get("source", "Unknown")
-                        
-                        st.markdown(f"**[{title}]({url})** `[{source}]`")
-                        clean_content = job.page_content.replace(f"Source: {source} | Title: {title} | ", "")
+                        company = job.metadata.get("company_name", "Tech Company")
+                        days_open = job.metadata.get("days_open", 0)
+                        salary = job.metadata.get("salary_raw", "Negotiable")
+                        if salary in ["Thoả thuận", "Thỏa thuận"] or not salary:
+                            salary = "Negotiable"
+
+                        comp_str = f"🏢 **{company}** &bull; " if company and company != "None" else ""
+
+                        if days_open == 0:
+                            badge_days = "🟢 Today"
+                        elif days_open == 1:
+                            badge_days = "🟢 1 day ago"
+                        elif days_open < 7:
+                            badge_days = f"🟢 {days_open} days ago"
+                        else:
+                            badge_days = f"🟡 {days_open} days ago"
+
+                        st.markdown(f"**[{title}]({url})**")
+                        st.markdown(f"{comp_str}`{source}` &bull; `{badge_days}` &bull; 💵 `{salary}`")
+                        clean_content = job.page_content.replace(f"Source: {source} | Title: {raw_title} | ", "")
                         st.caption(clean_content)
                         st.divider()
                         

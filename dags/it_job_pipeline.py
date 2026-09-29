@@ -27,14 +27,14 @@ default_args = {
 with DAG(
     'it_job_market_etl_pipeline',
     default_args=default_args,
-    description='End-to-end Job Market Pipeline',
+    description='End-to-end 3-Tier Medallion Job Market Pipeline',
     schedule='0 7 * * *', 
     catchup=False,
     max_active_runs=1
 ) as dag:
 
     # ==========================================
-    # PHASE 1 & 2: CRAWL & ENRICH (RAW LAYER)
+    # PHASE 1: BRONZE LAYER (CRAWL & INGEST)
     # ==========================================
     crawl_itviec = BashOperator(
         task_id='crawl_itviec', 
@@ -54,26 +54,16 @@ with DAG(
         bash_command=f'cd {SCRIPTS_DIR} && {PYTHON_CMD} enrich_job_details_TOPCV.py'
     )
 
-    # Dummy operator acting as a checkpoint for the Raw Layer
+    # Checkpoint after scraping is completed
     wait_for_raw_data = EmptyOperator(task_id='wait_for_raw_data')
-
 
     ingest_landing = BashOperator(
         task_id='ingest_landing_to_bronze',
         bash_command=f'cd {SCRIPTS_DIR} && {PYTHON_CMD} ingest_landing_to_bronze.py'
     )
 
-
     # ==========================================
-    # PHASE 2.5: DBT STAGING & INTERMEDIATE 
-    # ==========================================
-    dbt_build_int = BashOperator(
-        task_id='dbt_build_int',
-        bash_command=f'cd {DBT_DIR} && dbt run --select staging intermediate'
-    )
-
-    # ==========================================
-    # PHASE 3: AI EXTRACTOR (SILVER LAYER) & CLEANUP
+    # PHASE 2: AI EXTRACTION (BRONZE AI TABLE)
     # ==========================================
     ai_extract_itviec = BashOperator(
         task_id='ai_extract_itviec', 
@@ -83,18 +73,25 @@ with DAG(
         task_id='ai_extract_topcv', 
         bash_command=f'cd {SCRIPTS_DIR} && {PYTHON_CMD} ai_extractor.py topcv'
     )
-    
-    cleanup_expired = BashOperator(
-        task_id='cleanup_expired_jobs', 
-        bash_command=f'cd {SCRIPTS_DIR} && {PYTHON_CMD} cleanup_jobs.py'
+
+    # ==========================================
+    # PHASE 3: SILVER LAYER (DBT TRANSFORMATION)
+    # ==========================================
+    dbt_seed_data = BashOperator(
+        task_id='dbt_seed_taxonomy',
+        bash_command=f'cd {DBT_DIR} && dbt seed'
+    )
+
+    dbt_build_silver = BashOperator(
+        task_id='dbt_build_silver',
+        bash_command=f'cd {DBT_DIR} && dbt run --select silver'
     )
 
     # ==========================================
-    # PHASE 4: ANALYTICS (GOLD LAYER) & VECTOR SYNC
+    # PHASE 4: GOLD LAYER (ANALYTICS & MARTS)
     # ==========================================
-    # Only run the 'gold' models here to save execution time
-    update_metrics = BashOperator(
-        task_id='dbt_run_models_gold', 
+    dbt_build_gold = BashOperator(
+        task_id='dbt_build_gold', 
         bash_command=f"cd {DBT_DIR} && dbt run --select gold"
     )
 
@@ -102,7 +99,10 @@ with DAG(
         task_id='dbt_test_data_quality',
         bash_command=f"cd {DBT_DIR} && dbt test"
     )
-    
+
+    # ==========================================
+    # PHASE 5: VECTOR SYNC (SEMANTIC SEARCH)
+    # ==========================================
     sync_qdrant = BashOperator(
         task_id='sync_qdrant_vector_db', 
         bash_command=f'cd {SCRIPTS_DIR} && {PYTHON_CMD} sync_qdrant.py'
@@ -112,15 +112,19 @@ with DAG(
     # WORKFLOW / DEPENDENCIES DEFINITION
     # ==========================================
     
-    # 1. RAW CRAWL & ENRICH BRANCHES
+    # 1. Scraping & Ingestion to Bronze
     crawl_itviec >> enrich_itviec
     crawl_topcv >> enrich_topcv
+    [enrich_itviec, enrich_topcv] >> wait_for_raw_data >> ingest_landing
 
-    # 2. BRONZE INGESTION & STAGING
-    [enrich_itviec, enrich_topcv] >> wait_for_raw_data >> ingest_landing >> dbt_build_int
+    # 2. AI Extraction sequentially to prevent DuckDB file lock
+    ingest_landing >> ai_extract_itviec >> ai_extract_topcv
 
-    # 3. SILVER LAYER: Sequential extraction to prevent DuckDB write contention
-    dbt_build_int >> ai_extract_itviec >> ai_extract_topcv >> cleanup_expired
+    # 3. dbt Silver Transformation
+    ai_extract_topcv >> dbt_seed_data >> dbt_build_silver
 
-    # 4. GOLD LAYER & VECTOR SYNC: Finalize market marts and update vector embeddings
-    cleanup_expired >> update_metrics >> dbt_test >> sync_qdrant
+    # 4. dbt Gold Marts & Data Quality Tests
+    dbt_build_silver >> dbt_build_gold >> dbt_test
+
+    # 5. Vector DB Sync
+    dbt_test >> sync_qdrant

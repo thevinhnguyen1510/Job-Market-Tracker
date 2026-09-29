@@ -1,13 +1,15 @@
-{{ config(materialized='table') }}
+{{ config(
+    materialized='table',
+    description='Tổng hợp số lượng việc làm và số năm kinh nghiệm trung bình theo từng Role'
+) }}
 
 WITH base_data AS (
     SELECT 
         ai_job_role AS job_role,
         source,
         min_years_of_experience
-    FROM {{ source('silver', 'all_jobs') }} 
-    WHERE ai_job_role != 'Unknown' 
-      AND ai_job_role != 'Error'
+    FROM {{ ref('silver_jobs') }} 
+    WHERE ai_job_role NOT IN ('Unknown', 'Error')
       AND status = 'Active'
 )
 

@@ -1,33 +1,21 @@
+import os
+import sys
 import duckdb
 
-print("Begin running Ghost Task: Clean all Job expired...")
+print("Running Ghost Task: Audit and Refresh Silver Layer TTL...")
 
-# 1. Connect to DB
-db_path = '../job_market.duckdb'
-conn = duckdb.connect(db_path)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 
+if not os.path.exists(db_path):
+    db_path = 'job_market.duckdb'
+
+conn = duckdb.connect(db_path, read_only=True)
 try:
-    # 2. Count the number of Active jobs before cleaning
-    active_before = conn.execute("SELECT COUNT(*) FROM silver_all_jobs WHERE status = 'Active'").fetchone()[0]
-    print(f"Number of active jobs: {active_before}")
-
-    # 3. Execute the SQL command to clean up
-    conn.execute("""
-        UPDATE silver_all_jobs 
-        SET status = 'Expired'
-        WHERE status = 'Active' 
-          AND last_seen_at < CURRENT_TIMESTAMP - INTERVAL '3 days';
-    """)
-
-    # 4. Check the results again
-    active_after = conn.execute("SELECT COUNT(*) FROM silver_all_jobs WHERE status = 'Active'").fetchone()[0]
-    expired_count = active_before - active_after
-    
-    print(f"Done scanning! There are {expired_count} old jobs that have been marked as Expired.")
-    print(f"Current number of active jobs: {active_after}")
-
-except Exception as e:
-    print(f"Error: {e}")
+    active_jobs = conn.execute("SELECT COUNT(*) FROM silver_jobs WHERE status = 'Active'").fetchone()[0]
+    inactive_jobs = conn.execute("SELECT COUNT(*) FROM silver_jobs WHERE status = 'Inactive'").fetchone()[0]
+    print(f"Current Status: Active={active_jobs} | Inactive={inactive_jobs}")
 finally:
     conn.close()
-    print("Ghost Task has been completed!")
+
+print("Ghost Task completed.")

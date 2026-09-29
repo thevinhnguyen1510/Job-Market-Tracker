@@ -20,9 +20,8 @@ if TARGET_SOURCE not in ['itviec', 'topcv']:
     print(f"ERROR: Invalid source '{TARGET_SOURCE}'. Please use 'itviec' or 'topcv'.")
     sys.exit(1)
 
-INT_TABLE = "int_all_jobs" 
-SILVER_TABLE = "silver_all_jobs"
-SOURCE_FILTER = 'ITViec' if TARGET_SOURCE == 'itviec' else 'TopCV'
+RAW_TABLE = f"raw_{TARGET_SOURCE}_jobs"
+AI_EXTRACTIONS_TABLE = "raw_ai_extractions"
 
 print("=" * 70)
 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] INITIATING ASYNC AI EXTRACTOR FOR [{TARGET_SOURCE.upper()}]...")
@@ -51,59 +50,30 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 
 # ==========================================
-# 2. CREATE SILVER TABLE & FETCH PENDING JOBS (RELEASE LOCK IMMEDIATELY)
+# 2. CREATE AI EXTRACTIONS TABLE & FETCH PENDING JOBS
 # ==========================================
 conn = duckdb.connect(db_path)
 try:
     conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {SILVER_TABLE} (
+        CREATE TABLE IF NOT EXISTS {AI_EXTRACTIONS_TABLE} (
             job_id VARCHAR PRIMARY KEY,  
-            job_url VARCHAR,
-            job_title VARCHAR,
             min_years_of_experience INTEGER,
             ai_core_tech_stack VARCHAR, 
             english_requirement VARCHAR,
             ai_job_role VARCHAR,
             job_level VARCHAR,
-            source VARCHAR,
-            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status VARCHAR DEFAULT 'Active'
+            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
 
-    # 1. Mark jobs as Inactive if flagged as EXPIRED in intermediate staging
-    conn.execute(f"""
-        UPDATE {SILVER_TABLE}
-        SET status = 'Inactive',
-            last_seen_at = CURRENT_TIMESTAMP
-        WHERE job_id IN (
-            SELECT job_id FROM {INT_TABLE} 
-            WHERE source = '{SOURCE_FILTER}' AND job_description = 'EXPIRED'
-        )
-    """)
-
-    # 2. Update last_seen_at and Active status for jobs CRAWLED TODAY
-    conn.execute(f"""
-        UPDATE {SILVER_TABLE}
-        SET last_seen_at = CURRENT_TIMESTAMP, 
-            status = 'Active'
-        WHERE job_id IN (
-            SELECT job_id FROM {INT_TABLE} 
-            WHERE source = '{SOURCE_FILTER}' 
-              AND DATE(crawl_timestamp) = CURRENT_DATE
-              AND (job_description IS NULL OR job_description != 'EXPIRED')
-        )
-    """)
-
-    # 3. Retrieve jobs needing AI extraction (skip EXPIRED, connection errors, or empty)
+    # Retrieve jobs needing AI extraction (skip EXPIRED, connection errors, or empty)
     pending_jobs = conn.execute(f"""
         SELECT DISTINCT r.job_id, r.job_url, r.job_title, r.job_description 
-        FROM {INT_TABLE} r
-        LEFT JOIN {SILVER_TABLE} s ON r.job_id = s.job_id
-        WHERE s.job_id IS NULL 
-          AND r.source = '{SOURCE_FILTER}'
+        FROM {RAW_TABLE} r
+        LEFT JOIN {AI_EXTRACTIONS_TABLE} a ON r.job_id = a.job_id
+        WHERE a.job_id IS NULL 
           AND r.job_description IS NOT NULL
+          AND r.job_description != ''
           AND r.job_description != 'JD content not found'
           AND r.job_description != 'Connection error'
           AND r.job_description != 'EXPIRED'
@@ -148,7 +118,7 @@ class JobExtraction(BaseModel):
         "Data Scientist", "Data/Business Analyst", "Product Owner/Manager", 
         "QA/QC/Tester", "DevOps/Cloud", "System Admin", "UI/UX Designer", 
         "Security", "Scrum Master", "AI/Machine Learning", "Unknown"
-    ] = Field(..., description="Standard job role.")
+    ] = Field(..., description="Standard job role. General Software Engineer/Developer roles map to 'Backend' unless frontend/mobile is specified.")
     
     job_level: Literal["Intern", "Fresher", "Junior", "Middle", "Senior", "Manager", "Director", "Unknown"] = Field(
         ..., description="Standard seniority level."
@@ -167,7 +137,6 @@ class JobExtraction(BaseModel):
 # ==========================================
 # 4. ASYNC EXTRACTION WORKER WITH SEMAPHORE
 # ==========================================
-# Cap at 6 concurrent requests (fast throughput while staying safely below rate limits)
 CONCURRENCY_LIMIT = 6
 semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
@@ -186,7 +155,11 @@ async def extract_single_job(index: int, total: int, job: Tuple) -> Tuple:
                     messages=[
                         {
                             "role": "system",
-                            "content": "You are an elite Data Engineer and HR Tech Analyst. Extract structured data from IT Job Descriptions."
+                            "content": (
+                                "You are an elite Data Engineer and HR Tech Analyst. Extract structured data from IT Job Descriptions. "
+                                "IMPORTANT: In the tech market, 'Software Engineer' and 'Software Developer' roles focusing on "
+                                "server-side, microservices, databases, or languages (Java, C#, .NET, Python, Golang, C++) must be classified as 'Backend'."
+                            )
                         },
                         {
                             "role": "user",
@@ -197,22 +170,19 @@ async def extract_single_job(index: int, total: int, job: Tuple) -> Tuple:
                 )
                 print(f"[{index + 1}/{total}] [OK] Extracted: [{extracted.job_level}] {extracted.job_role} - {job_title[:35]}")
                 return (
-                    job_id, job_url, job_title,
+                    job_id,
                     extracted.min_years_of_experience,
                     json.dumps(extracted.core_tech_stack),
                     extracted.english_requirement.value,
                     extracted.job_role,
-                    extracted.job_level,
-                    TARGET_SOURCE.upper(),
-                    'Active'
+                    extracted.job_level
                 )
             except Exception as e:
                 if attempt == 1:
                     print(f"[{index + 1}/{total}] [FAIL] Error extracting {job_id}: {e}")
                     return (
-                        job_id, job_url, job_title, 0, "[]",
-                        EnglishLevel.NONE.value, "Unknown", "Error",
-                        TARGET_SOURCE.upper(), "Error"
+                        job_id, 0, "[]",
+                        EnglishLevel.NONE.value, "Unknown", "Error"
                     )
                 await asyncio.sleep(1.0)
 
@@ -227,23 +197,27 @@ async def main():
     # ==========================================
     # 5. BULK INSERT INTO DUCKDB
     # ==========================================
-    print(f"\nBulk inserting {len(results)} extracted records into {SILVER_TABLE}...")
+    print(f"\nBulk inserting {len(results)} extracted records into {AI_EXTRACTIONS_TABLE}...")
     db_conn = duckdb.connect(db_path)
     try:
         db_conn.executemany(f"""
-            INSERT INTO {SILVER_TABLE} (
-                job_id, job_url, job_title, min_years_of_experience,
+            INSERT INTO {AI_EXTRACTIONS_TABLE} (
+                job_id, min_years_of_experience,
                 ai_core_tech_stack, english_requirement, ai_job_role,
-                job_level, source, status, last_seen_at, processed_at
+                job_level, processed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT (job_id) DO UPDATE SET 
-                last_seen_at = EXCLUDED.last_seen_at,
-                status = EXCLUDED.status;
+                min_years_of_experience = EXCLUDED.min_years_of_experience,
+                ai_core_tech_stack = EXCLUDED.ai_core_tech_stack,
+                english_requirement = EXCLUDED.english_requirement,
+                ai_job_role = EXCLUDED.ai_job_role,
+                job_level = EXCLUDED.job_level,
+                processed_at = EXCLUDED.processed_at;
         """, results)
         
-        success_total = sum(1 for r in results if r[7] != 'Error')
-        print(f"-> [SUCCESS] Saved {success_total}/{total_pending} jobs successfully!")
+        success_total = sum(1 for r in results if r[5] != 'Error')
+        print(f"-> [SUCCESS] Saved {success_total}/{total_pending} jobs successfully into {AI_EXTRACTIONS_TABLE}!")
     finally:
         db_conn.close()
 

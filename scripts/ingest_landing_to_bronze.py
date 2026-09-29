@@ -18,13 +18,15 @@ conn.execute("""
         job_id VARCHAR PRIMARY KEY, job_url VARCHAR, job_title VARCHAR,
         company_name VARCHAR, location VARCHAR, salary_raw VARCHAR,
         tech_stack VARCHAR, source VARCHAR, crawl_timestamp TIMESTAMP,
-        experience_level VARCHAR, job_category VARCHAR, job_description VARCHAR
+        experience_level VARCHAR, job_category VARCHAR, job_description VARCHAR,
+        first_seen_at TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS raw_topcv_jobs (
         job_id VARCHAR PRIMARY KEY, job_url VARCHAR, job_title VARCHAR,
         company_name VARCHAR, location VARCHAR, salary_raw VARCHAR,
         tech_stack VARCHAR, source VARCHAR, crawl_timestamp TIMESTAMP,
-        experience_level VARCHAR, job_category VARCHAR, job_description VARCHAR
+        experience_level VARCHAR, job_category VARCHAR, job_description VARCHAR,
+        first_seen_at TIMESTAMP
     );
 """)
 
@@ -53,12 +55,14 @@ try:
             INSERT INTO {table_name} (
                 job_id, job_url, job_title, company_name, location,
                 salary_raw, tech_stack, source, crawl_timestamp,
-                experience_level, job_category, job_description
+                experience_level, job_category, job_description,
+                first_seen_at
             )
             SELECT 
                 job_id, job_url, job_title, company_name, location,
                 salary_raw, tech_stack, source, crawl_timestamp,
-                experience_level, job_category, job_description
+                experience_level, job_category, job_description,
+                crawl_timestamp AS first_seen_at
             FROM read_parquet('{posix_pattern}')
             ON CONFLICT (job_id) DO UPDATE SET
                 crawl_timestamp = EXCLUDED.crawl_timestamp,

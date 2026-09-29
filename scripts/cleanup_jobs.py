@@ -1,14 +1,13 @@
 import os
+import sys
 import duckdb
 from datetime import datetime
 
 # ==============================================================================
-# PIPELINE CLEANUP: TTL EXPIRATION BASED ON REAL CRAWL TIMESTAMPS
+# PIPELINE STATUS REPORT & AUDIT: SILVER JOBS METRICS
 # ==============================================================================
-EXPIRY_DAYS = 3
-
 print("=" * 70)
-print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] INITIATING CLEANUP JOBS...")
+print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] AUDITING SILVER JOBS STATUS...")
 print("=" * 70)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -16,61 +15,43 @@ db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 
 if not os.path.exists(db_path):
     print(f"Error: Database file not found at {db_path}")
-    exit(1)
+    sys.exit(1)
 
-conn = duckdb.connect(db_path)
+conn = duckdb.connect(db_path, read_only=True)
 
 try:
-    # 1. Count active jobs before cleanup
-    active_before = conn.execute("""
-        SELECT COUNT(*) FROM silver_all_jobs WHERE status = 'Active'
-    """).fetchone()[0]
-    print(f"-> Active jobs before cleanup: {active_before}")
+    # 1. Total jobs count
+    total_jobs = conn.execute("SELECT COUNT(*) FROM silver_jobs").fetchone()[0]
+    active_count = conn.execute("SELECT COUNT(*) FROM silver_jobs WHERE status = 'Active'").fetchone()[0]
+    inactive_count = conn.execute("SELECT COUNT(*) FROM silver_jobs WHERE status = 'Inactive'").fetchone()[0]
 
-    # 2. Resynchronize 'last_seen_at' with actual crawl timestamps from raw tables
-    print("-> Synchronizing 'last_seen_at' with actual crawl timestamps from raw tables...")
-    conn.execute("""
-        UPDATE silver_all_jobs s
-        SET last_seen_at = r.crawl_timestamp
-        FROM int_all_jobs r
-        WHERE s.job_id = r.job_id
-          AND r.crawl_timestamp IS NOT NULL
-          AND s.last_seen_at > r.crawl_timestamp
-    """)
-
-    # 3. Mark jobs as Inactive if not observed within EXPIRY_DAYS
-    cleanup_query = f"""
-        UPDATE silver_all_jobs
-        SET status = 'Inactive'
-        WHERE status = 'Active'
-          AND last_seen_at < (CURRENT_TIMESTAMP - INTERVAL '{EXPIRY_DAYS} days')
-    """
-    conn.execute(cleanup_query)
-
-    # 4. Aggregate cleanup statistics
-    stats = conn.execute(f"""
-        SELECT source, COUNT(*) as inactive_count
-        FROM silver_all_jobs
-        WHERE status = 'Inactive'
+    # 2. Stats by source
+    stats_by_source = conn.execute("""
+        SELECT 
+            source,
+            COUNT(*) FILTER (WHERE status = 'Active') AS active_jobs,
+            COUNT(*) FILTER (WHERE status = 'Inactive') AS inactive_jobs,
+            ROUND(AVG(days_open) FILTER (WHERE status = 'Active'), 1) AS avg_active_days_open
+        FROM silver_jobs
         GROUP BY source
     """).fetchall()
 
-    active_after = conn.execute("""
-        SELECT COUNT(*) FROM silver_all_jobs WHERE status = 'Active'
+    print(f"-> Total Jobs in Silver Layer: {total_jobs}")
+    print(f"   * Active Jobs:             {active_count} ({active_count/total_jobs*100:.1f}%)")
+    print(f"   * Inactive / Expired Jobs: {inactive_count} ({inactive_count/total_jobs*100:.1f}%)\n")
+
+    print("-> Breakdown by Source:")
+    for src, act, inact, avg_days in stats_by_source:
+        print(f"   * [{src}] Active: {act} | Inactive: {inact} | Avg Active Days Open: {avg_days} days")
+
+    # 3. High risk of expiration (Active >= 7 days)
+    high_risk_count = conn.execute("""
+        SELECT COUNT(*) FROM silver_jobs WHERE status = 'Active' AND days_open >= 7
     """).fetchone()[0]
+    print(f"\n-> High-Risk Jobs (Active >= 7 days, eligible for Deep Purge): {high_risk_count}")
 
-    deactivated_count = active_before - active_after
-    print(f"\n[OK] CLEANUP SUMMARY:")
-    print(f"   - Stale Jobs Deactivated this run: {deactivated_count}")
-    print(f"   - Remaining Active Jobs in DB:     {active_after}")
-    print(f"   - Total Inactive Jobs in DB:       {active_before - deactivated_count + (active_before - active_after)}")
-    for source, cnt in stats:
-        print(f"     * {source}: {cnt} inactive")
-    print("=" * 70)
-
-except Exception as e:
-    print(f"[ERROR] Cleanup process failed: {e}")
-    raise e
 finally:
     conn.close()
-    print("Cleanup task finished.")
+
+print("=" * 70)
+print("AUDIT COMPLETED.")

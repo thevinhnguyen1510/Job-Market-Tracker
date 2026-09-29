@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import random
 import duckdb
@@ -8,10 +9,10 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 
 # ==============================================================================
-# STEALTH DEEP PURGE: PACED VERIFICATION (ANTI-BOT & CLOUDFLARE BYPASS)
+# STEALTH DEEP PURGE: ADAPTIVE VERIFICATION (ANTI-BOT & CLOUDFLARE BYPASS)
 # ==============================================================================
 print("=" * 70)
-print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] INITIATING PACED DEEP PURGE...")
+print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] INITIATING ADAPTIVE DEEP PURGE...")
 print("=" * 70)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,19 +20,30 @@ db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 
 if not os.path.exists(db_path):
     print(f"Error: Database file not found at {db_path}")
-    exit(1)
+    sys.exit(1)
 
 conn = duckdb.connect(db_path)
+total_active = conn.execute("SELECT COUNT(*) FROM silver_jobs WHERE status = 'Active'").fetchone()[0]
+
+# Adaptive Verification: Chỉ quét các job có nguy cơ hết hạn cao (days_open >= 7)
+# Job mới đăng (< 7 ngày) 99% vẫn đang tuyển, bỏ qua để tiết kiệm 70% request & tránh bị ban IP.
 active_jobs = conn.execute("""
-    SELECT job_id, job_url, source, job_title 
-    FROM silver_all_jobs 
+    SELECT job_id, job_url, source, job_title, days_open
+    FROM silver_jobs 
     WHERE status = 'Active'
-    ORDER BY source, job_id
+      AND days_open >= 7
+    ORDER BY days_open DESC, source, job_id
 """).fetchall()
 conn.close()
 
 total_jobs = len(active_jobs)
-print(f"-> Total Active jobs to verify: {total_jobs}")
+print(f"-> Total Active jobs in DB: {total_active}")
+print(f"-> High-risk jobs to verify (days_open >= 7 days): {total_jobs}")
+print(f"-> Fresh jobs skipped (< 7 days): {total_active - total_jobs}\n")
+
+if total_jobs == 0:
+    print("All active jobs are fresh (< 7 days). No verification needed.")
+    sys.exit(0)
 
 # Kiểm tra FlareSolverr cho TopCV
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
@@ -55,18 +67,17 @@ active_count = 0
 error_count = 0
 
 for index, job in enumerate(active_jobs, 1):
-    job_id, job_url, source, title = job
+    job_id, job_url, source, title, days_open = job
     src = str(source).upper()
     short_title = title[:35] if title else job_url.split('/')[-1][:35]
-    
     is_expired = False
-    reason = "Active"
+    reason = ""
 
     try:
         # -------------------------------------------------------------
-        # 1. KIỂM TRA TOPCV (Dùng FlareSolverr nếu có để vượt Cloudflare 403)
+        # 1. KIỂM TRA TOPCV (Ưu tiên FlareSolverr nếu có)
         # -------------------------------------------------------------
-        if 'TOPCV' in src:
+        if src == 'TOPCV':
             html_text = ""
             if has_flaresolverr:
                 try:
@@ -122,31 +133,31 @@ for index, job in enumerate(active_jobs, 1):
 
     except Exception as e:
         error_count += 1
-        reason = f"Network Timeout / Skip"
+        reason = f"Network Timeout / Skip: {e}"
 
     # Kết quả từng job
     if is_expired:
         expired_job_ids.append(job_id)
-        print(f"[{index}/{total_jobs}] [EXPIRED] -> {src} | {reason} | {short_title}")
+        print(f"[{index}/{total_jobs}] [EXPIRED] -> {src} | {days_open}d open | {reason} | {short_title}")
     else:
         active_count += 1
         if index % 20 == 0 or index == total_jobs:
             print(f"[{index}/{total_jobs}] Checked... (Found {len(expired_job_ids)} expired so far)")
 
-    # Sleep điều độ chống rate limit (tương tự crawler)
+    # Sleep điều độ chống rate limit
     time.sleep(random.uniform(0.6, 1.2))
 
 print("\n" + "=" * 70)
 print(f"SCAN COMPLETED:")
-print(f"   - Total Checked:  {total_jobs}")
-print(f"   - Still Active:   {active_count}")
-print(f"   - EXPIRED Found:  {len(expired_job_ids)}")
-print(f"   - Errors/Skipped: {error_count}")
+print(f"   - Total High-Risk Checked: {total_jobs}")
+print(f"   - Still Active:            {active_count}")
+print(f"   - EXPIRED Found:           {len(expired_job_ids)}")
+print(f"   - Errors/Skipped:          {error_count}")
 print("=" * 70)
 
-# Cập nhật ngay vào DuckDB nếu tìm thấy
+# Cập nhật ngay vào Bronze DuckDB nếu tìm thấy
 if expired_job_ids:
-    print(f"\nUpdating {len(expired_job_ids)} expired jobs to 'Inactive' in DuckDB...")
+    print(f"\nPersisting {len(expired_job_ids)} expired jobs into DuckDB Bronze tables...")
     conn = duckdb.connect(db_path)
     try:
         BATCH_SIZE = 500
@@ -154,17 +165,31 @@ if expired_job_ids:
             batch = expired_job_ids[i:i + BATCH_SIZE]
             placeholders = ", ".join(["?"] * len(batch))
             conn.execute(f"""
-                UPDATE silver_all_jobs 
-                SET status = 'Inactive'
+                UPDATE raw_itviec_jobs 
+                SET job_description = 'EXPIRED'
                 WHERE job_id IN ({placeholders})
             """, batch)
-        print("   [OK] DuckDB updated successfully!")
+            conn.execute(f"""
+                UPDATE raw_topcv_jobs 
+                SET job_description = 'EXPIRED'
+                WHERE job_id IN ({placeholders})
+            """, batch)
+        print("   [OK] Bronze tables updated successfully with EXPIRED flag!")
     finally:
         conn.close()
 
-    print("\nSynchronizing Qdrant Vector DB (Purging Inactive vectors)...")
-    os.system("python scripts/sync_qdrant.py")
+    print("\nSynchronizing Qdrant Vector DB (Soft Delete)...")
+    python_cmd = sys.executable
+    os.system(f'"{python_cmd}" scripts/sync_qdrant.py')
+
+    print("\nRebuilding dbt Silver and Gold models...")
+    dbt_exe = os.path.join(BASE_DIR, "venv", "Scripts", "dbt.exe")
+    dbt_dir = os.path.join(BASE_DIR, "analytics_dbt")
+    if os.path.exists(dbt_exe):
+        os.system(f'cd "{dbt_dir}" && "{dbt_exe}" run')
+    else:
+        os.system(f'cd "{dbt_dir}" && dbt run')
 else:
-    print("\nAll active jobs are verified alive!")
+    print("\nAll scanned high-risk jobs are verified alive!")
 
 print("\nDone.")

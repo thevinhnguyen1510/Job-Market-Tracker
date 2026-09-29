@@ -11,6 +11,7 @@ env/
 *.db
 *.duckdb.wal
 *.csv
+!analytics_dbt/seeds/*.csv
 local_qdrant_db/
 
 # Ignore Python cache

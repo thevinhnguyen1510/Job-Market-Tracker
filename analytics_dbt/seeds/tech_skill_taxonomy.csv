@@ -1,0 +1,76 @@
+skill_name,skill_category
+Python,Programming Language
+Java,Programming Language
+Scala,Programming Language
+SQL,Programming Language
+Go,Programming Language
+Golang,Programming Language
+C++,Programming Language
+C#,Programming Language
+Rust,Programming Language
+R,Programming Language
+Bash,Programming Language
+Shell,Programming Language
+JavaScript,Programming Language
+TypeScript,Programming Language
+PostgreSQL,Database
+MySQL,Database
+Oracle,Database
+SQL Server,Database
+MongoDB,Database
+Redis,Database
+Cassandra,Database
+Elasticsearch,Database
+DuckDB,Database
+ClickHouse,Database
+DynamoDB,Database
+Neo4j,Database
+AWS,Cloud & DevOps
+Azure,Cloud & DevOps
+GCP,Cloud & DevOps
+Google Cloud,Cloud & DevOps
+Docker,Cloud & DevOps
+Kubernetes,Cloud & DevOps
+Terraform,Cloud & DevOps
+Linux,Cloud & DevOps
+CI/CD,Cloud & DevOps
+Git,Cloud & DevOps
+Ansible,Cloud & DevOps
+Spark,Big Data & Data Engineering
+PySpark,Big Data & Data Engineering
+Kafka,Big Data & Data Engineering
+Hadoop,Big Data & Data Engineering
+Airflow,Big Data & Data Engineering
+dbt,Big Data & Data Engineering
+Flink,Big Data & Data Engineering
+Snowflake,Big Data & Data Engineering
+BigQuery,Big Data & Data Engineering
+Databricks,Big Data & Data Engineering
+Hive,Big Data & Data Engineering
+Delta Lake,Big Data & Data Engineering
+Iceberg,Big Data & Data Engineering
+Presto,Big Data & Data Engineering
+Trino,Big Data & Data Engineering
+NiFi,Big Data & Data Engineering
+PowerBI,BI & Data Analytics
+Tableau,BI & Data Analytics
+Looker,BI & Data Analytics
+Metabase,BI & Data Analytics
+Excel,BI & Data Analytics
+DAX,BI & Data Analytics
+Qlik,BI & Data Analytics
+Machine Learning,AI & Data Science
+Deep Learning,AI & Data Science
+TensorFlow,AI & Data Science
+PyTorch,AI & Data Science
+Scikit-learn,AI & Data Science
+LLM,AI & Data Science
+LangChain,AI & Data Science
+NLP,AI & Data Science
+Computer Vision,AI & Data Science
+FastAPI,Framework & Library
+Django,Framework & Library
+Flask,Framework & Library
+Spring Boot,Framework & Library
+Pandas,Framework & Library
+NumPy,Framework & Library

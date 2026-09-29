@@ -1,0 +1,31 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: "Dữ liệu thô cào về từ ITViec, TopCV và kết quả trích xuất AI (Bronze Layer)"
+    schema: main
+    tables:
+      - name: itviec_jobs
+        identifier: raw_itviec_jobs
+        description: "Bảng dữ liệu thô cào từ ITViec"
+        columns:
+          - name: job_id
+            tests:
+              - not_null
+
+      - name: topcv_jobs
+        identifier: raw_topcv_jobs
+        description: "Bảng dữ liệu thô cào từ TopCV"
+        columns:
+          - name: job_id
+            tests:
+              - not_null
+
+      - name: ai_extractions
+        identifier: raw_ai_extractions
+        description: "Bảng lưu trữ kết quả trích xuất cấu trúc từ OpenAI (Bronze AI Table)"
+        columns:
+          - name: job_id
+            tests:
+              - not_null
+              - unique

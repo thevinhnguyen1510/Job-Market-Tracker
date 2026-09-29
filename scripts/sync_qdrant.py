@@ -2,6 +2,7 @@ import os
 import duckdb
 import hashlib
 import uuid
+import sys
 from dotenv import load_dotenv
 
 # --- IMPORT REQUIRED MODELS FOR COLLECTION CREATION ---
@@ -13,15 +14,13 @@ from langchain_openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 
-import sys
-
 # 1. SETUP CONFIGURATION
 load_dotenv()
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QDRANT_PATH = os.path.join(BASE_DIR, 'local_qdrant_db')
 COLLECTION_NAME = "all_it_jobs_v6" 
 
-print("INITIATING QDRANT VECTOR DB AUTO-SYNC...")
+print("INITIATING QDRANT VECTOR DB AUTO-SYNC (SOFT DELETE ENABLED)...")
 
 try:
     client = QdrantClient(path=QDRANT_PATH)
@@ -59,27 +58,37 @@ vectorstore = QdrantVectorStore(
 )
 
 # 2. CONNECT TO DUCKDB (Read-Only Mode)
-# [FIXED]: Using dynamic cross-platform path instead of hardcoded Docker path
 db_path = os.path.join(BASE_DIR, 'job_market.duckdb')
 conn = duckdb.connect(db_path, read_only=True)
 
 # ========================================================
-# TASK A: CLEANUP INACTIVE / EXPIRED JOBS (Skip on first run)
+# TASK A: SOFT DELETE FOR INACTIVE / EXPIRED JOBS
 # ========================================================
-if not is_first_run:
-    inactive_jobs_df = conn.execute("""
-        SELECT job_id FROM silver_all_jobs
-        WHERE status != 'Active' OR status IS NULL
-    """).df()
+inactive_jobs_df = conn.execute("""
+    SELECT job_id FROM silver_all_jobs
+    WHERE status != 'Active' OR status IS NULL
+""").df()
 
-    if not inactive_jobs_df.empty:
-        print(f"Found {len(inactive_jobs_df)} inactive/expired jobs in DB. Ensuring removed from Qdrant...")
-        delete_ids = [str(uuid.UUID(hashlib.md5(str(j_id).encode()).hexdigest())) for j_id in inactive_jobs_df['job_id']]
-        BATCH_SIZE = 500
-        for i in range(0, len(delete_ids), BATCH_SIZE):
-            batch = delete_ids[i:i + BATCH_SIZE]
-            client.delete(collection_name=COLLECTION_NAME, points_selector=batch)
-        print("   [OK] Inactive cleanup from Qdrant completed!")
+if not inactive_jobs_df.empty:
+    print(f"Found {len(inactive_jobs_df)} inactive/expired jobs in DB. Applying Soft Delete (payload: is_active=False)...")
+    inactive_ids = [str(uuid.UUID(hashlib.md5(str(j_id).encode()).hexdigest())) for j_id in inactive_jobs_df['job_id']]
+    BATCH_SIZE = 500
+    deactivated_count = 0
+    for i in range(0, len(inactive_ids), BATCH_SIZE):
+        batch = inactive_ids[i:i + BATCH_SIZE]
+        existing = client.retrieve(collection_name=COLLECTION_NAME, ids=batch)
+        existing_ids = [p.id for p in existing]
+        if existing_ids:
+            client.set_payload(
+                collection_name=COLLECTION_NAME,
+                payload={
+                    "is_active": False,
+                    "status": "Inactive"
+                },
+                points=existing_ids
+            )
+            deactivated_count += len(existing_ids)
+    print(f"   [OK] Soft Delete in Qdrant completed ({deactivated_count} existing points set to is_active=False)!")
 
 # ========================================================
 # TASK B: DATA UPSERT (Auto-detect Full vs Incremental Load)
@@ -96,7 +105,7 @@ else:
 jobs_df = conn.execute(sql_query).df()
 
 if jobs_df.empty:
-    print("No data to sync today.")
+    print("No new active jobs to vectorize today.")
 else:
     print(f"Found {len(jobs_df)} jobs. Calling OpenAI for Embeddings...")
     job_docs = []
@@ -110,9 +119,18 @@ else:
                 "job_id": row['job_id'],      
                 "job_title": row['job_title'], 
                 "job_url": row['job_url'], 
+                "company_name": str(row['company_name']) if row.get('company_name') else "Tech Company",
+                "ai_job_role": row['ai_job_role'],
+                "ai_core_tech_stack": row['ai_core_tech_stack'],
+                "job_level": row['job_level'],
+                "english_requirement": row['english_requirement'],
+                "salary_raw": str(row['salary_raw']) if row.get('salary_raw') else "Negotiable",
                 "yoe": row['min_years_of_experience'],
                 "source": row['source'],
-                "status": row['status']
+                "status": row['status'],
+                "is_active": True,
+                "first_seen_at": str(row['first_seen_at']) if row.get('first_seen_at') is not None else '',
+                "days_open": int(row['days_open']) if row.get('days_open') is not None else 0
             }
         ))
         
@@ -121,7 +139,36 @@ else:
 
     # add_documents acts as an UPSERT in Qdrant based on the provided IDs
     vectorstore.add_documents(documents=job_docs, ids=doc_ids)
+
+    # Ensure top-level payload also has is_active = True for fast filtering
+    BATCH_SIZE = 500
+    for i in range(0, len(doc_ids), BATCH_SIZE):
+        batch = doc_ids[i:i + BATCH_SIZE]
+        client.set_payload(
+            collection_name=COLLECTION_NAME,
+            payload={"is_active": True, "status": "Active"},
+            points=batch
+        )
+
     print(f"   [OK] Successfully synced {len(jobs_df)} Vectors into the Hybrid space!")
+
+# ========================================================
+# TASK C: ENSURE EXISTING ACTIVE POINTS HAVE is_active = True
+# ========================================================
+active_jobs_df = conn.execute("SELECT job_id FROM silver_all_jobs WHERE status = 'Active'").df()
+if not active_jobs_df.empty:
+    active_ids = [str(uuid.UUID(hashlib.md5(str(j_id).encode()).hexdigest())) for j_id in active_jobs_df['job_id']]
+    BATCH_SIZE = 500
+    for i in range(0, len(active_ids), BATCH_SIZE):
+        batch = active_ids[i:i + BATCH_SIZE]
+        existing = client.retrieve(collection_name=COLLECTION_NAME, ids=batch)
+        existing_ids = [p.id for p in existing]
+        if existing_ids:
+            client.set_payload(
+                collection_name=COLLECTION_NAME,
+                payload={"is_active": True, "status": "Active"},
+                points=existing_ids
+            )
 
 conn.close()
 client.close()

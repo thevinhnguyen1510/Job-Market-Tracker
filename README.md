@@ -32,11 +32,7 @@ Imagine having a tireless personal assistant who wakes up every morning at 7:00 
 
 The platform follows a clean **3-Tier Medallion Architecture (Bronze $\rightarrow$ Silver $\rightarrow$ Gold)** with a dedicated **Hybrid Vector Database & RAG Serving Layer**.
 
-<div align="center">
-  <a href="docs/assets/architecture.svg">
-    <img src="docs/assets/architecture.svg" alt="Lakehouse & RAG Pipeline Architecture" width="100%">
-  </a>
-</div>
+![Lakehouse & RAG Pipeline Architecture](docs/assets/architecture.svg)
 
 ---
 
@@ -101,10 +97,10 @@ Job postings change rapidly: recruiters take down jobs, or listings expire while
 - **Tab 2 - AI Career Coach (Two-Stage Enterprise RAG):**
   1. Candidate uploads a resume in PDF format.
   2. `PyPDFLoader` extracts text, and GPT-4o-mini determines practical experience (Years of Experience), Target Role, and Primary Tech Stack.
-  3. Smart Gatekeeper & Soft Scoring matches candidates against active listings.
-  4. Local Cross-Encoder Reranker (`BAAI/bge-reranker-base`) reranks the Top matching fits.
-  5. Rich job cards display Company Name, Source, `days_open` freshness badge, and disclosed salary.
-  6. GPT-4o-mini generates a comprehensive skills gap analysis and a personalized 30-day preparation roadmap.
+  3. **Qdrant Hybrid Search (Dense + BM25):** The system searches for the most relevant active jobs, emphasizing the candidate's core tech stack via Sparse Search without demanding a strict 100% exact match, while matching semantic roles and enforcing exact YoE logic filters.
+  4. **Cross-Encoder Reranker:** HuggingFace `BAAI/bge-reranker-base` re-scores the retrieved matches to surface the absolute best fit.
+  5. UI strips out generic prefixes (e.g. "Nổi bật") from job titles to ensure clean rendering. Rich job cards display Company Name, Source, `days_open` freshness badge, and disclosed salary.
+  6. GPT-4o-mini acts as a Senior HR Director, generating a comprehensive skills gap analysis and a personalized 30-day preparation roadmap.
 
 ---
 

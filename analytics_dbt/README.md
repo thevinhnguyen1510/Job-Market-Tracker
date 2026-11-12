@@ -1,15 +1,9 @@
-Welcome to your new dbt project!
+# Warehouse transformations
 
-### Using the starter project
+- `models/sources.yml` declares the Bronze tables populated by the Python pipeline.
+- `models/silver/` normalizes jobs, applies lifecycle rules and expands the job–skill relationship.
+- `models/gold/` aggregates job demand, skills and salary distributions.
+- `macros/` contains shared location and salary normalization.
+- `seeds/tech_skill_taxonomy.csv` maps skills to categories.
 
-Try running the following commands:
-- dbt run
-- dbt test
-
-
-### Resources:
-- Learn more about dbt [in the docs](https://docs.getdbt.com/docs/introduction)
-- Check out [Discourse](https://discourse.getdbt.com/) for commonly asked questions and answers
-- Join the [chat](https://community.getdbt.com/) on Slack for live discussions and support
-- Find [dbt events](https://events.getdbt.com) near you
-- Check out [the blog](https://blog.getdbt.com/) for the latest news on dbt's development and best practices
+From this directory, run `dbt --profiles-dir . build` after ingest and AI extraction. Airflow runs seed, Silver, Gold and tests as separate tasks for easier diagnosis. When overriding the DuckDB location, export the same absolute `DUCKDB_PATH` used by Python.

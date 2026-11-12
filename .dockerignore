@@ -1,0 +1,14 @@
+.env
+.git
+.venv
+venv
+env
+data
+logs
+local_qdrant_db
+*.duckdb
+*.duckdb.wal
+**/__pycache__
+**/.pytest_cache
+analytics_dbt/target
+analytics_dbt/logs

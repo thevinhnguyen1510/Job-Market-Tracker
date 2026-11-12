@@ -65,7 +65,7 @@ RUN pip install --no-cache-dir --prefer-binary \
     "instructor>=1.3.0" \
     dbt-duckdb \
     click==8.1.7 \
-    qdrant-client \
+    "qdrant-client>=1.9.0" \
     langchain-core \
     langchain \
     langchain-openai \

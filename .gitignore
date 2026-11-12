@@ -22,3 +22,4 @@ __pycache__/
 # Ignore log files
 *.log
 logs/
+downloaded_files/

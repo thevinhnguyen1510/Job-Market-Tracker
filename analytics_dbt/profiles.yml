@@ -2,7 +2,7 @@ analytics_dbt:
   outputs:
     dev:
       type: duckdb
-      # Nếu có biến môi trường DUCKDB_PATH thì lấy (Docker), nếu không thì lùi 1 cấp thư mục (Local Windows)
+      # Run local dbt commands from this directory when using the default path.
       path: "{{ env_var('DUCKDB_PATH', '../job_market.duckdb') }}"
       threads: 4
   target: dev
